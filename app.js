@@ -427,9 +427,7 @@ function initEvents() {
 
   DOM.clearChatBtn.addEventListener('click', () => {
     if (confirm('Clear the conversation log?')) {
-      const welcomeBox = DOM.chatLog.querySelector('.welcome-box');
       DOM.chatLog.innerHTML = '';
-      if (welcomeBox) DOM.chatLog.appendChild(welcomeBox);
       STATE.messages = [];
       showToast('Conversation cleared');
     }
@@ -449,17 +447,6 @@ function initEvents() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend(DOM.userInput.value);
-    }
-  });
-
-  document.addEventListener('click', (e) => {
-    const starter = e.target.closest('.starter-btn');
-    if (starter) {
-      const prompt = starter.getAttribute('data-prompt');
-      if (prompt) {
-        DOM.userInput.value = prompt;
-        handleSend(prompt);
-      }
     }
   });
 }
