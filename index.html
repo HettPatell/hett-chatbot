@@ -75,22 +75,23 @@
         <div class="field-group">
           <label for="aiModeSelect">Response Engine</label>
           <select id="aiModeSelect" class="form-select">
+            <option value="groq" selected>Groq Cloud (Lightning-fast Llama 3.3 / Llama 3.1)</option>
             <option value="offline">Built-in Text Companion (Zero Setup / Offline)</option>
             <option value="gemini">Google Gemini API (Live)</option>
             <option value="openai">OpenAI / Compatible API (Live)</option>
           </select>
-          <span class="field-hint">The built-in engine operates locally without requiring an API key.</span>
+          <span class="field-hint" id="engineHint">Groq delivers lightning-fast responses using Llama 3 models.</span>
         </div>
 
-        <div id="apiKeyGroup" class="field-group hidden">
+        <div id="apiKeyGroup" class="field-group">
           <label for="apiKeyInput">API Key</label>
           <input type="password" id="apiKeyInput" class="form-input" placeholder="Paste your API key here">
           <span class="field-hint">Keys remain client-side in your local browser storage only.</span>
         </div>
 
-        <div id="modelGroup" class="field-group hidden">
+        <div id="modelGroup" class="field-group">
           <label for="modelInput">Model Name</label>
-          <input type="text" id="modelInput" class="form-input" value="gemini-1.5-flash">
+          <input type="text" id="modelInput" class="form-input" value="groq/compound-mini">
         </div>
 
         <div class="field-group">

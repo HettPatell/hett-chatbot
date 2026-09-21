@@ -10,9 +10,9 @@ const STATE = {
   theme: localStorage.getItem('hett_theme') || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
   font: localStorage.getItem('hett_font') || 'sans',
   nickname: localStorage.getItem('hett_nickname') || 'User',
-  aiMode: localStorage.getItem('hett_ai_mode') || 'offline',
-  apiKey: localStorage.getItem('hett_api_key') || '',
-  modelName: localStorage.getItem('hett_model') || 'gemini-1.5-flash',
+  aiMode: localStorage.getItem('hett_ai_mode') || 'groq',
+  apiKey: localStorage.getItem('hett_api_key') || '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',
+  modelName: localStorage.getItem('hett_model') || 'groq/compound-mini',
   isGenerating: false,
   messages: []
 };
@@ -329,6 +329,42 @@ async function fetchOpenAI(prompt) {
   return text;
 }
 
+async function fetchGroq(prompt) {
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+
+  const messages = [
+    { role: 'system', content: SYSTEM_INSTRUCTION },
+    ...STATE.messages.slice(-6).map(m => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      content: m.content
+    })),
+    { role: 'user', content: prompt }
+  ];
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${STATE.apiKey}`
+    },
+    body: JSON.stringify({
+      model: STATE.modelName || 'llama-3.3-70b-versatile',
+      messages,
+      temperature: 0.6
+    })
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Groq error status ${res.status}`);
+  }
+
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Empty response from Groq API.');
+  return text;
+}
+
 // ---------------------------------------------------------------------------
 // Send Message Orchestrator
 // ---------------------------------------------------------------------------
@@ -347,7 +383,9 @@ async function handleSend(rawText) {
 
   try {
     let reply = '';
-    if (STATE.aiMode === 'gemini' && STATE.apiKey) {
+    if (STATE.aiMode === 'groq' && STATE.apiKey) {
+      reply = await fetchGroq(text);
+    } else if (STATE.aiMode === 'gemini' && STATE.apiKey) {
       reply = await fetchGemini(text);
     } else if (STATE.aiMode === 'openai' && STATE.apiKey) {
       reply = await fetchOpenAI(text);
@@ -389,15 +427,45 @@ function closeSettings() {
 }
 
 function updateSettingsUI() {
-  const isLive = DOM.aiModeSelect.value !== 'offline';
+  const mode = DOM.aiModeSelect.value;
+  const isLive = mode !== 'offline';
   DOM.apiKeyGroup.classList.toggle('hidden', !isLive);
   DOM.modelGroup.classList.toggle('hidden', !isLive);
+
+  const engineHint = document.getElementById('engineHint');
+
+  if (mode === 'groq') {
+    if (engineHint) engineHint.textContent = 'Groq provides ultra-fast inference with Groq Compound & Qwen models.';
+    DOM.apiKeyInput.placeholder = 'Paste your Groq API key (starts with gsk_...)';
+    if (!DOM.modelInput.value || DOM.modelInput.value.includes('gemini') || DOM.modelInput.value.includes('gpt') || DOM.modelInput.value.includes('llama')) {
+      DOM.modelInput.value = 'groq/compound-mini';
+    }
+  } else if (mode === 'gemini') {
+    if (engineHint) engineHint.textContent = 'Google Gemini via Google AI Studio.';
+    DOM.apiKeyInput.placeholder = 'Paste your Gemini API key...';
+    if (!DOM.modelInput.value || DOM.modelInput.value.includes('compound') || DOM.modelInput.value.includes('gpt')) {
+      DOM.modelInput.value = 'gemini-1.5-flash';
+    }
+  } else if (mode === 'openai') {
+    if (engineHint) engineHint.textContent = 'OpenAI or OpenRouter compatible endpoint.';
+    DOM.apiKeyInput.placeholder = 'Paste your OpenAI or OpenRouter key...';
+    if (!DOM.modelInput.value || DOM.modelInput.value.includes('compound') || DOM.modelInput.value.includes('gemini')) {
+      DOM.modelInput.value = 'gpt-4o-mini';
+    }
+  } else {
+    if (engineHint) engineHint.textContent = 'The built-in engine operates locally without requiring an API key.';
+  }
 }
 
 function saveSettings() {
   STATE.aiMode = DOM.aiModeSelect.value;
   STATE.apiKey = DOM.apiKeyInput.value.trim();
-  STATE.modelName = DOM.modelInput.value.trim() || 'gemini-1.5-flash';
+
+  let defaultModel = 'groq/compound-mini';
+  if (STATE.aiMode === 'gemini') defaultModel = 'gemini-1.5-flash';
+  if (STATE.aiMode === 'openai') defaultModel = 'gpt-4o-mini';
+
+  STATE.modelName = DOM.modelInput.value.trim() || defaultModel;
   STATE.nickname = DOM.userNickname.value.trim() || 'User';
   STATE.font = DOM.fontSelect.value;
 
