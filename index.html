@@ -11,6 +11,14 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   
+  <!-- Mozilla PDF.js for reading PDF files -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
+
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -44,19 +52,30 @@
 
       <!-- Input Area -->
       <footer class="footer">
+        <!-- Attachment Preview Tray -->
+        <div id="attachmentTray" class="attachment-tray hidden">
+          <div id="attachmentPreview" class="attachment-preview"></div>
+          <button type="button" id="removeAttachmentBtn" class="remove-attachment-btn" title="Remove attachment" aria-label="Remove attachment">✕</button>
+        </div>
+
         <form id="chatForm" class="chat-form">
+          <!-- Hidden File Input for Image & PDF -->
+          <input type="file" id="fileAttachmentInput" accept="image/*,application/pdf" style="display: none;">
+
+          <!-- Attach File Button -->
+          <button type="button" id="attachFileBtn" class="attach-btn" title="Attach an Image or PDF (or drag & drop / paste)" aria-label="Attach file">📎</button>
+
           <textarea 
             id="userInput" 
             class="chat-textarea" 
-            placeholder="Type your message to Hett..." 
+            placeholder="Type a message or share an Image / PDF..." 
             rows="1" 
             maxlength="2500" 
-            aria-label="Message to Hett"
-            required></textarea>
+            aria-label="Message to Hett"></textarea>
           <button type="submit" id="sendBtn" class="send-btn" aria-label="Send message">Send 📤</button>
         </form>
         <div class="input-info">
-          <span>Press Enter to send • Shift + Enter for a new line</span>
+          <span>Press Enter to send • Shift + Enter for newline • Paste screenshots with Ctrl+V</span>
         </div>
       </footer>
 
@@ -75,12 +94,12 @@
         <div class="field-group">
           <label for="aiModeSelect">Response Engine</label>
           <select id="aiModeSelect" class="form-select">
-            <option value="groq" selected>Groq Cloud (Lightning-fast Llama 3.3 / Llama 3.1)</option>
+            <option value="groq" selected>Groq Cloud (Qwen 3.8 27B Vision + Text)</option>
             <option value="offline">Built-in Text Companion (Zero Setup / Offline)</option>
             <option value="gemini">Google Gemini API (Live)</option>
             <option value="openai">OpenAI / Compatible API (Live)</option>
           </select>
-          <span class="field-hint" id="engineHint">Groq delivers lightning-fast responses using Llama 3 models.</span>
+          <span class="field-hint" id="engineHint">Groq delivers ultra-fast responses with native Vision (Images) and Text.</span>
         </div>
 
         <div id="apiKeyGroup" class="field-group">
@@ -91,7 +110,7 @@
 
         <div id="modelGroup" class="field-group">
           <label for="modelInput">Model Name</label>
-          <input type="text" id="modelInput" class="form-input" value="groq/compound-mini">
+          <input type="text" id="modelInput" class="form-input" value="qwen/qwen3.8-27b">
         </div>
 
         <div class="field-group">

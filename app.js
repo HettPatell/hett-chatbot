@@ -1,20 +1,34 @@
 /**
- * Hett — Simple Text Chatbot Logic
- * Clean typography, simple subtle emojis, no brackets.
+ * Hett — Multimodal Text & Vision Chatbot Logic
+ * Features:
+ * - Ultra-fast Groq Qwen 3.8 27B Vision + Text integration
+ * - Image sharing & complete detailed visual descriptions
+ * - PDF document upload & client-side text extraction (pdf.js)
+ * - Clipboard screenshot paste (Ctrl + V) & Drag-and-drop file upload
+ * - Clean typography, subtle emojis, zero brackets
  */
 
 // ---------------------------------------------------------------------------
-// State
+// Model Migration & State Setup
 // ---------------------------------------------------------------------------
+// Automatically migrate deprecated / unavailable models from previous sessions
+const savedModel = localStorage.getItem('hett_model');
+let activeModel = savedModel;
+if (!activeModel || activeModel.includes('llama-3.3') || activeModel.includes('compound') || activeModel.includes('mini')) {
+  activeModel = 'qwen/qwen3.8-27b';
+  localStorage.setItem('hett_model', activeModel);
+}
+
 const STATE = {
   theme: localStorage.getItem('hett_theme') || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
   font: localStorage.getItem('hett_font') || 'sans',
   nickname: localStorage.getItem('hett_nickname') || 'User',
   aiMode: localStorage.getItem('hett_ai_mode') || 'groq',
   apiKey: localStorage.getItem('hett_api_key') || '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',
-  modelName: localStorage.getItem('hett_model') || 'groq/compound-mini',
+  modelName: activeModel,
   isGenerating: false,
-  messages: []
+  messages: [],
+  currentAttachment: null // { type: 'image' | 'pdf', name: string, size: string, dataUrl?: string, text?: string, pages?: number }
 };
 
 // ---------------------------------------------------------------------------
@@ -22,6 +36,7 @@ const STATE = {
 // ---------------------------------------------------------------------------
 const DOM = {
   html: document.documentElement,
+  chatWrapper: document.querySelector('.chat-wrapper'),
   themeToggleBtn: document.getElementById('themeToggleBtn'),
   openSettingsBtn: document.getElementById('openSettingsBtn'),
   closeSettingsBtn: document.getElementById('closeSettingsBtn'),
@@ -40,7 +55,13 @@ const DOM = {
   chatForm: document.getElementById('chatForm'),
   userInput: document.getElementById('userInput'),
   sendBtn: document.getElementById('sendBtn'),
-  toast: document.getElementById('toast')
+  toast: document.getElementById('toast'),
+  // Attachment UI
+  fileAttachmentInput: document.getElementById('fileAttachmentInput'),
+  attachFileBtn: document.getElementById('attachFileBtn'),
+  attachmentTray: document.getElementById('attachmentTray'),
+  attachmentPreview: document.getElementById('attachmentPreview'),
+  removeAttachmentBtn: document.getElementById('removeAttachmentBtn')
 };
 
 // ---------------------------------------------------------------------------
@@ -54,7 +75,7 @@ function showToast(message) {
   if (toastTimeout) clearTimeout(toastTimeout);
   toastTimeout = setTimeout(() => {
     DOM.toast.classList.add('hidden');
-  }, 2600);
+  }, 3200);
 }
 
 // ---------------------------------------------------------------------------
@@ -80,11 +101,152 @@ function applyFont(font) {
 }
 
 // ---------------------------------------------------------------------------
+// PDF & Image Processing
+// ---------------------------------------------------------------------------
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Failed to read file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function extractTextFromPdf(file) {
+  if (!window.pdfjsLib) {
+    throw new Error('PDF.js library is loading. Please wait 2 seconds and re-attach.');
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  const pdf = await loadingTask.promise;
+
+  let fullText = '';
+  const maxPagesToRead = Math.min(pdf.numPages, 30); // Read up to 30 pages
+
+  for (let i = 1; i <= maxPagesToRead; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map(item => item.str).join(' ');
+    if (pageText.trim().length > 0) {
+      fullText += `[Page ${i}]\n${pageText}\n\n`;
+    }
+  }
+
+  if (pdf.numPages > maxPagesToRead) {
+    fullText += `\n[Note: Document truncated at page ${maxPagesToRead} of ${pdf.numPages}]\n`;
+  }
+
+  return {
+    text: fullText.trim(),
+    pages: pdf.numPages
+  };
+}
+
+async function processSelectedFile(file) {
+  if (!file) return;
+
+  const isImage = file.type.startsWith('image/');
+  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+  if (!isImage && !isPdf) {
+    showToast('Please attach an Image (PNG, JPG, WebP) or PDF file.');
+    return;
+  }
+
+  // Max 20MB
+  if (file.size > 20 * 1024 * 1024) {
+    showToast('File size exceeds 20MB limit.');
+    return;
+  }
+
+  showToast('Reading file...');
+
+  try {
+    if (isImage) {
+      const dataUrl = await readFileAsDataUrl(file);
+      setAttachment({
+        type: 'image',
+        name: file.name || 'Image',
+        size: formatFileSize(file.size),
+        dataUrl: dataUrl
+      });
+      showToast('Image attached 📸');
+    } else if (isPdf) {
+      const { text, pages } = await extractTextFromPdf(file);
+      if (!text || text.length === 0) {
+        showToast('Notice: This PDF seems to contain scanned images without text layer.');
+      }
+      setAttachment({
+        type: 'pdf',
+        name: file.name || 'Document.pdf',
+        size: formatFileSize(file.size),
+        text: text,
+        pages: pages
+      });
+      showToast(`PDF attached 📄 (${pages} pages ready)`);
+    }
+  } catch (err) {
+    console.error('File processing error:', err);
+    showToast('Could not process file: ' + err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attachment UI State & Tray
+// ---------------------------------------------------------------------------
+function setAttachment(attachment) {
+  STATE.currentAttachment = attachment;
+  DOM.attachmentPreview.innerHTML = '';
+
+  if (attachment.type === 'image') {
+    const img = document.createElement('img');
+    img.src = attachment.dataUrl;
+    img.className = 'preview-thumb';
+    img.alt = attachment.name;
+
+    const meta = document.createElement('div');
+    meta.className = 'preview-meta';
+    meta.innerHTML = `<span class="preview-name">${attachment.name}</span><span class="preview-details">Image • ${attachment.size}</span>`;
+
+    DOM.attachmentPreview.appendChild(img);
+    DOM.attachmentPreview.appendChild(meta);
+  } else if (attachment.type === 'pdf') {
+    const icon = document.createElement('span');
+    icon.className = 'pdf-icon';
+    icon.textContent = '📄';
+
+    const meta = document.createElement('div');
+    meta.className = 'preview-meta';
+    meta.innerHTML = `<span class="preview-name">${attachment.name}</span><span class="preview-details">PDF • ${attachment.pages || 1} pages • ${attachment.size}</span>`;
+
+    DOM.attachmentPreview.appendChild(icon);
+    DOM.attachmentPreview.appendChild(meta);
+  }
+
+  DOM.attachmentTray.classList.remove('hidden');
+  DOM.userInput.focus();
+}
+
+function clearAttachment() {
+  STATE.currentAttachment = null;
+  DOM.attachmentTray.classList.add('hidden');
+  DOM.attachmentPreview.innerHTML = '';
+  DOM.fileAttachmentInput.value = '';
+}
+
+// ---------------------------------------------------------------------------
 // Markdown & Text Formatter
 // ---------------------------------------------------------------------------
 function formatText(raw) {
   if (!raw) return '';
-  
+
   // Escape HTML
   let escaped = raw
     .replace(/&/g, '&amp;')
@@ -139,7 +301,7 @@ function formatText(raw) {
 // ---------------------------------------------------------------------------
 // Message Rendering
 // ---------------------------------------------------------------------------
-function appendMessage(role, content) {
+function appendMessage(role, content, attachment = null) {
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const isHett = role === 'assistant';
 
@@ -161,10 +323,39 @@ function appendMessage(role, content) {
   headerRow.appendChild(author);
   headerRow.appendChild(timeSpan);
 
-  // Body
+  // Body container
   const body = document.createElement('div');
   body.className = 'message-body';
-  body.innerHTML = formatText(content);
+
+  // Render attachment if present
+  if (attachment) {
+    if (attachment.type === 'image') {
+      const img = document.createElement('img');
+      img.src = attachment.dataUrl;
+      img.className = 'msg-image-attachment';
+      img.alt = attachment.name || 'Uploaded image';
+      img.title = 'Click to open full size';
+      img.addEventListener('click', () => {
+        const win = window.open();
+        if (win) {
+          win.document.write(`<img src="${attachment.dataUrl}" style="max-width:100%;height:auto;margin:auto;display:block;">`);
+        }
+      });
+      body.appendChild(img);
+    } else if (attachment.type === 'pdf') {
+      const pdfBadge = document.createElement('div');
+      pdfBadge.className = 'msg-pdf-attachment';
+      pdfBadge.innerHTML = `<span class="pdf-icon">📄</span> <div><strong>${attachment.name}</strong> (${attachment.pages || 1} pages)</div>`;
+      body.appendChild(pdfBadge);
+    }
+  }
+
+  // Text content
+  if (content && content.trim().length > 0) {
+    const textDiv = document.createElement('div');
+    textDiv.innerHTML = formatText(content);
+    body.appendChild(textDiv);
+  }
 
   entry.appendChild(headerRow);
   entry.appendChild(body);
@@ -192,15 +383,16 @@ function appendMessage(role, content) {
   DOM.chatLog.appendChild(entry);
   scrollToBottom();
 
-  STATE.messages.push({ role, content, time });
+  STATE.messages.push({ role, content, attachment, time });
 }
 
 function scrollToBottom() {
   DOM.chatLog.scrollTop = DOM.chatLog.scrollHeight;
 }
 
-function setTyping(isTyping) {
+function setTyping(isTyping, customText = 'Hett is thinking...') {
   if (isTyping) {
+    DOM.typingIndicator.querySelector('.typing-text').textContent = customText;
     DOM.typingIndicator.classList.remove('hidden');
     scrollToBottom();
   } else {
@@ -209,82 +401,150 @@ function setTyping(isTyping) {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in Text Conversational Engine
+// Built-in Text Conversational Engine (Offline Fallback)
 // ---------------------------------------------------------------------------
-function generateOfflineResponse(userPrompt) {
-  const query = userPrompt.toLowerCase().trim();
+function generateOfflineResponse(userPrompt, attachment = null) {
+  const query = (userPrompt || '').toLowerCase().trim();
   const name = STATE.nickname || 'Friend';
 
-  // Deployment inquiries
-  if (query.includes('deploy') || query.includes('vercel') || query.includes('host') || query.includes('github')) {
-    return `To deploy Hett to Vercel:\n\n1. Push this folder to a GitHub repository or drag the folder to Netlify Drop (app.netlify.com/drop).\n2. On Vercel (vercel.com), click "Add New Project" and import your repository.\n3. The included vercel.json file handles everything. Click "Deploy".\n\nYour deployment will be live in under 30 seconds! 🚀`;
+  if (attachment && attachment.type === 'image') {
+    return `I received your image (**${attachment.name}**)! 📸\n\nTo get a full, deep AI description with vision analysis, ensure your Groq or Gemini API key is connected in ⚙️ **Settings**. In offline mode, I can confirm the image loaded successfully at ${attachment.size}.`;
   }
 
-  // Identity / capabilities
-  if (query.includes('who are you') || query.includes('what are you') || query.includes('capabilities') || query.includes('help')) {
-    return `I am Hett, your clean and direct text-focused assistant. 💡\n\nHere is how I can help you:\n- Clear explanations and summaries without unnecessary fluff.\n- Structured markdown formatting (checklists, code snippets, outlines).\n- Fast, zero-dependency offline performance.\n- Support for live Gemini or OpenAI models via Settings!`;
-  }
-
-  // Email drafting
-  if (query.includes('email') || query.includes('draft')) {
-    return `Subject: Quick follow-up regarding our discussion\n\nHello [Name],\n\nI hope you are having a productive week.\n\nI am writing to follow up on our recent conversation regarding [Topic]. Please let me know if you have had a chance to review the details, or if there is anything else you need from my side.\n\nLooking forward to hearing from you.\n\nBest regards,\n${name}`;
-  }
-
-  // Checklist / Task organization
-  if (query.includes('checklist') || query.includes('task') || query.includes('organize') || query.includes('schedule')) {
-    return `Structured Daily Checklist: 📋\n\n1. Define Priority 1: Pick the single most impactful task for today.\n2. Deep Work: Allocate 60 to 90 minutes of quiet, focused time to that task.\n3. Communications: Batch emails and messages in one dedicated block.\n4. End-of-Day Review: Check off finished goals and plan your first move for tomorrow.`;
-  }
-
-  // Code / technical questions
-  if (query.includes('code') || query.includes('javascript') || query.includes('python') || query.includes('html') || query.includes('css')) {
-    return `Technical Overview: 💻\n\nHett is built using vanilla web standards:\n- HTML5 for semantic structure.\n- CSS3 custom variables for instant dark and light mode switching.\n- JavaScript for clean message rendering and state management.\n\nWhat specific code question would you like to explore?`;
+  if (attachment && attachment.type === 'pdf') {
+    const snippet = (attachment.text || '').slice(0, 500);
+    return `I received your PDF document (**${attachment.name}** with ${attachment.pages} pages)! 📄\n\n**Document Preview:**\n> ${snippet || 'No readable text layer found.'}\n\n*Connect your Groq or Gemini key in ⚙️ Settings for in-depth intelligent analysis.*`;
   }
 
   // Greetings
   if (/^(hi|hello|hey|greetings|good morning|good afternoon)/i.test(query)) {
-    const greetings = [
-      `Hello, ${name}! 👋 How can I assist you today?`,
-      `Greetings, ${name}! I am ready. What is on your mind?`,
-      `Good day, ${name}! How can I help make your work smoother today?`
-    ];
-    return greetings[Math.floor(Math.random() * greetings.length)];
+    return `Hello, ${name}! 👋 How can I assist you today? You can ask questions, paste images directly with Ctrl+V, or upload PDFs with the 📎 button!`;
   }
 
-  // Default fallback
-  const genericReplies = [
-    `Understood, ${name}. Here is a concise thought on that:\n\nWhen evaluating this topic, it helps to identify the primary objective before diving into the details. Where would you like to focus next?`,
-    `Received. I have processed your input regarding "${userPrompt.slice(0, 45)}". Would you like a step-by-step breakdown, an outline, or a quick summary?`,
-    `Noted, ${name}. Let me know if you would like me to draft or organize this further for you.`
-  ];
-  return genericReplies[Math.floor(Math.random() * genericReplies.length)];
+  return `Understood, ${name}. I am running in offline mode. For full AI intelligence, deep image analysis, and PDF comprehension, connect your Groq API key in ⚙️ **Settings**!`;
 }
 
 // ---------------------------------------------------------------------------
-// Live API Handlers
+// Live API Handlers (Groq, Gemini, OpenAI)
 // ---------------------------------------------------------------------------
-const SYSTEM_INSTRUCTION = `You are Hett, a direct, concise, and helpful assistant. Use simple, clean formatting and subtle emojis where appropriate. Do not use square brackets like [...] for UI buttons or formatting.`;
+const SYSTEM_INSTRUCTION = `You are Hett, a direct, concise, and highly capable AI assistant.
+- When an image is provided: Provide an exhaustive, deep, and complete description of everything in the image. Cover the main subject, background, text/words visible (OCR), colors, composition, setting, and notable details.
+- When a PDF or document is provided: Read the extracted text carefully, answer the user's questions or provide a structured, clear summary with key takeaways.
+- Keep tone direct, insightful, and well-structured using Markdown.`;
 
-async function fetchGemini(prompt) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${STATE.modelName || 'gemini-1.5-flash'}:generateContent?key=${STATE.apiKey}`;
+async function fetchGroq(prompt, attachment = null) {
+  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
 
-  const contents = [
-    {
-      role: 'user',
-      parts: [
-        { text: `${SYSTEM_INSTRUCTION}\n\nUser Name: ${STATE.nickname}\nUser Message: ${prompt}` }
-      ]
-    }
+  // Build message history
+  const messages = [
+    { role: 'system', content: SYSTEM_INSTRUCTION }
   ];
+
+  // Include recent conversation context (text only for previous turns)
+  STATE.messages.slice(-4).forEach(m => {
+    if (m.content) {
+      messages.push({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content
+      });
+    }
+  });
+
+  // Construct current user content
+  let currentContent;
+
+  if (attachment && attachment.type === 'image') {
+    const userText = prompt && prompt.trim().length > 0 
+      ? prompt 
+      : "Please analyze this image thoroughly and provide a complete, detailed description of everything visible in it, including main objects, any text or labels, colors, and context.";
+
+    currentContent = [
+      { type: "text", text: userText },
+      { type: "image_url", image_url: { url: attachment.dataUrl } }
+    ];
+  } else if (attachment && attachment.type === 'pdf') {
+    const userText = prompt && prompt.trim().length > 0
+      ? prompt
+      : "Please read this attached PDF document carefully and provide a comprehensive summary, key findings, and highlight important points.";
+
+    const textContent = attachment.text && attachment.text.length > 0 
+      ? attachment.text.slice(0, 60000) 
+      : "[Notice: No readable text could be extracted from this PDF. It might contain scanned images.]";
+
+    currentContent = `Document Attached: ${attachment.name} (${attachment.pages} pages)\n\n--- Document Text Content ---\n${textContent}\n\n--- User Request ---\n${userText}`;
+  } else {
+    currentContent = prompt;
+  }
+
+  messages.push({ role: 'user', content: currentContent });
+
+  // Use Qwen 3.8 27B which has verified vision and text support on Groq
+  const modelToUse = STATE.modelName || 'qwen/qwen3.8-27b';
 
   const res = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents })
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${STATE.apiKey}`
+    },
+    body: JSON.stringify({
+      model: modelToUse,
+      messages: messages,
+      temperature: 0.6
+    })
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Gemini error status ${res.status}`);
+    const errMsg = err.error?.message || `Groq error status ${res.status}`;
+    throw new Error(errMsg);
+  }
+
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('No response text received from Groq.');
+  return text;
+}
+
+async function fetchGemini(prompt, attachment = null) {
+  const model = STATE.modelName && STATE.modelName.includes('gemini') ? STATE.modelName : 'gemini-1.5-flash';
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${STATE.apiKey}`;
+
+  const parts = [];
+
+  if (attachment && attachment.type === 'image') {
+    // Extract base64 without prefix
+    const matches = attachment.dataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+    if (matches) {
+      parts.push({
+        inlineData: {
+          mimeType: matches[1],
+          data: matches[2]
+        }
+      });
+    }
+    const userText = prompt && prompt.trim().length > 0
+      ? prompt
+      : "Please analyze this image thoroughly and provide a complete, detailed description of everything visible in it.";
+    parts.push({ text: `${SYSTEM_INSTRUCTION}\n\n${userText}` });
+  } else if (attachment && attachment.type === 'pdf') {
+    const userText = prompt && prompt.trim().length > 0 ? prompt : "Please provide a comprehensive summary and key takeaways of this PDF.";
+    parts.push({
+      text: `${SYSTEM_INSTRUCTION}\n\nAttached Document: ${attachment.name}\n\nContent:\n${attachment.text.slice(0, 60000)}\n\nUser Request: ${userText}`
+    });
+  } else {
+    parts.push({ text: `${SYSTEM_INSTRUCTION}\n\n${prompt}` });
+  }
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ role: 'user', parts }] })
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Gemini status ${res.status}`);
   }
 
   const data = await res.json();
@@ -293,115 +553,55 @@ async function fetchGemini(prompt) {
   return text;
 }
 
-async function fetchOpenAI(prompt) {
-  const endpoint = 'https://api.openai.com/v1/chat/completions';
-
-  const messages = [
-    { role: 'system', content: SYSTEM_INSTRUCTION },
-    ...STATE.messages.slice(-6).map(m => ({
-      role: m.role === 'user' ? 'user' : 'assistant',
-      content: m.content
-    })),
-    { role: 'user', content: prompt }
-  ];
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${STATE.apiKey}`
-    },
-    body: JSON.stringify({
-      model: STATE.modelName || 'gpt-4o-mini',
-      messages,
-      temperature: 0.6
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `OpenAI error status ${res.status}`);
-  }
-
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new Error('Empty response from OpenAI.');
-  return text;
-}
-
-async function fetchGroq(prompt) {
-  const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
-
-  const messages = [
-    { role: 'system', content: SYSTEM_INSTRUCTION },
-    ...STATE.messages.slice(-6).map(m => ({
-      role: m.role === 'user' ? 'user' : 'assistant',
-      content: m.content
-    })),
-    { role: 'user', content: prompt }
-  ];
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${STATE.apiKey}`
-    },
-    body: JSON.stringify({
-      model: STATE.modelName || 'llama-3.3-70b-versatile',
-      messages,
-      temperature: 0.6
-    })
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Groq error status ${res.status}`);
-  }
-
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new Error('Empty response from Groq API.');
-  return text;
-}
-
 // ---------------------------------------------------------------------------
 // Send Message Orchestrator
 // ---------------------------------------------------------------------------
 async function handleSend(rawText) {
-  const text = rawText.trim();
-  if (!text || STATE.isGenerating) return;
+  const text = (rawText || '').trim();
+  const attachment = STATE.currentAttachment;
 
+  // Need either text or attachment
+  if ((!text && !attachment) || STATE.isGenerating) return;
+
+  // Reset inputs & tray
   DOM.userInput.value = '';
   DOM.userInput.style.height = 'auto';
+  clearAttachment();
 
-  appendMessage('user', text);
+  // Show user bubble
+  appendMessage('user', text, attachment);
 
   STATE.isGenerating = true;
   DOM.sendBtn.disabled = true;
-  setTyping(true);
+
+  if (attachment && attachment.type === 'image') {
+    setTyping(true, 'Hett is analyzing the image...');
+  } else if (attachment && attachment.type === 'pdf') {
+    setTyping(true, 'Hett is reading the PDF...');
+  } else {
+    setTyping(true, 'Hett is thinking...');
+  }
 
   try {
     let reply = '';
     if (STATE.aiMode === 'groq' && STATE.apiKey) {
-      reply = await fetchGroq(text);
+      reply = await fetchGroq(text, attachment);
     } else if (STATE.aiMode === 'gemini' && STATE.apiKey) {
-      reply = await fetchGemini(text);
-    } else if (STATE.aiMode === 'openai' && STATE.apiKey) {
-      reply = await fetchOpenAI(text);
+      reply = await fetchGemini(text, attachment);
     } else {
-      const delay = Math.min(1000, Math.max(400, text.length * 15));
+      const delay = Math.min(1200, Math.max(500, (text.length || 20) * 15));
       await new Promise(r => setTimeout(r, delay));
-      reply = generateOfflineResponse(text);
+      reply = generateOfflineResponse(text, attachment);
     }
 
     setTyping(false);
     appendMessage('assistant', reply);
   } catch (err) {
+    console.error('API call failed:', err);
     setTyping(false);
-    const fallback = generateOfflineResponse(text);
-    appendMessage('assistant', `Note: Live API is currently unavailable (${err.message}). Here is a reply from the built-in companion:\n\n${fallback}`);
-    showToast('Switched to built-in companion');
+    const fallback = generateOfflineResponse(text, attachment);
+    appendMessage('assistant', `⚠️ **API Error**: ${err.message}\n\n*Fallback response:*\n\n${fallback}`);
+    showToast('API issue: ' + err.message.slice(0, 40));
   } finally {
     STATE.isGenerating = false;
     DOM.sendBtn.disabled = false;
@@ -435,21 +635,21 @@ function updateSettingsUI() {
   const engineHint = document.getElementById('engineHint');
 
   if (mode === 'groq') {
-    if (engineHint) engineHint.textContent = 'Groq provides ultra-fast inference with Groq Compound & Qwen models.';
+    if (engineHint) engineHint.textContent = 'Groq delivers ultra-fast responses with native Vision (Images) and Text via Qwen 3.8 27B.';
     DOM.apiKeyInput.placeholder = 'Paste your Groq API key (starts with gsk_...)';
-    if (!DOM.modelInput.value || DOM.modelInput.value.includes('gemini') || DOM.modelInput.value.includes('gpt') || DOM.modelInput.value.includes('llama')) {
-      DOM.modelInput.value = 'groq/compound-mini';
+    if (!DOM.modelInput.value || DOM.modelInput.value.includes('gemini') || DOM.modelInput.value.includes('compound') || DOM.modelInput.value.includes('llama')) {
+      DOM.modelInput.value = 'qwen/qwen3.8-27b';
     }
   } else if (mode === 'gemini') {
-    if (engineHint) engineHint.textContent = 'Google Gemini via Google AI Studio.';
+    if (engineHint) engineHint.textContent = 'Google Gemini API with multimodal vision support.';
     DOM.apiKeyInput.placeholder = 'Paste your Gemini API key...';
-    if (!DOM.modelInput.value || DOM.modelInput.value.includes('compound') || DOM.modelInput.value.includes('gpt')) {
+    if (!DOM.modelInput.value || DOM.modelInput.value.includes('qwen') || DOM.modelInput.value.includes('compound')) {
       DOM.modelInput.value = 'gemini-1.5-flash';
     }
   } else if (mode === 'openai') {
-    if (engineHint) engineHint.textContent = 'OpenAI or OpenRouter compatible endpoint.';
-    DOM.apiKeyInput.placeholder = 'Paste your OpenAI or OpenRouter key...';
-    if (!DOM.modelInput.value || DOM.modelInput.value.includes('compound') || DOM.modelInput.value.includes('gemini')) {
+    if (engineHint) engineHint.textContent = 'OpenAI or compatible vision API endpoint.';
+    DOM.apiKeyInput.placeholder = 'Paste your OpenAI key...';
+    if (!DOM.modelInput.value || DOM.modelInput.value.includes('qwen')) {
       DOM.modelInput.value = 'gpt-4o-mini';
     }
   } else {
@@ -461,7 +661,7 @@ function saveSettings() {
   STATE.aiMode = DOM.aiModeSelect.value;
   STATE.apiKey = DOM.apiKeyInput.value.trim();
 
-  let defaultModel = 'groq/compound-mini';
+  let defaultModel = 'qwen/qwen3.8-27b';
   if (STATE.aiMode === 'gemini') defaultModel = 'gemini-1.5-flash';
   if (STATE.aiMode === 'openai') defaultModel = 'gpt-4o-mini';
 
@@ -473,16 +673,17 @@ function saveSettings() {
   localStorage.setItem('hett_api_key', STATE.apiKey);
   localStorage.setItem('hett_model', STATE.modelName);
   localStorage.setItem('hett_nickname', STATE.nickname);
-  
+
   applyFont(STATE.font);
   closeSettings();
   showToast('Preferences saved');
 }
 
 // ---------------------------------------------------------------------------
-// Event Listeners
+// Event Listeners Initialization
 // ---------------------------------------------------------------------------
 function initEvents() {
+  // Theme Toggle
   DOM.themeToggleBtn.addEventListener('click', toggleTheme);
   DOM.openSettingsBtn.addEventListener('click', openSettings);
   DOM.closeSettingsBtn.addEventListener('click', closeSettings);
@@ -497,10 +698,24 @@ function initEvents() {
     if (confirm('Clear the conversation log?')) {
       DOM.chatLog.innerHTML = '';
       STATE.messages = [];
+      clearAttachment();
       showToast('Conversation cleared');
     }
   });
 
+  // Attach Button & File Input
+  DOM.attachFileBtn.addEventListener('click', () => {
+    DOM.fileAttachmentInput.click();
+  });
+
+  DOM.fileAttachmentInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) processSelectedFile(file);
+  });
+
+  DOM.removeAttachmentBtn.addEventListener('click', clearAttachment);
+
+  // Form Submit
   DOM.chatForm.addEventListener('submit', (e) => {
     e.preventDefault();
     handleSend(DOM.userInput.value);
@@ -517,6 +732,54 @@ function initEvents() {
       handleSend(DOM.userInput.value);
     }
   });
+
+  // Clipboard Paste for Images (Ctrl + V)
+  window.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        const blob = items[i].getAsFile();
+        if (blob) {
+          e.preventDefault();
+          processSelectedFile(blob);
+          showToast('Image pasted from clipboard 📸');
+          break;
+        }
+      }
+    }
+  });
+
+  // Drag and Drop Files over Chat
+  const dropZone = DOM.chatWrapper || document.body;
+
+  ['dragenter', 'dragover'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.add('drag-over');
+    }, false);
+  });
+
+  ['dragleave', 'dragend'].forEach(eventName => {
+    dropZone.addEventListener(eventName, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.classList.remove('drag-over');
+    }, false);
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dropZone.classList.remove('drag-over');
+
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) {
+      processSelectedFile(files[0]);
+    }
+  }, false);
 }
 
 // ---------------------------------------------------------------------------
