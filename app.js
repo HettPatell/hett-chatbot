@@ -2,30 +2,46 @@
  * Hett — Multimodal Text & Vision Chatbot Logic
  * Features:
  * - Ultra-fast Groq Qwen 3.8 27B Vision + Text integration
- * - Image sharing & complete detailed visual descriptions
+ * - Automatic image resizing & canvas optimization for fast processing
  * - PDF document upload & client-side text extraction (pdf.js)
  * - Clipboard screenshot paste (Ctrl + V) & Drag-and-drop file upload
- * - Clean typography, subtle emojis, zero brackets
+ * - Auto-repair of broken or outdated local storage settings
  */
 
 // ---------------------------------------------------------------------------
-// Model Migration & State Setup
+// Model & API Auto-Repair / Initialization
 // ---------------------------------------------------------------------------
-// Automatically migrate deprecated / unavailable models from previous sessions
-const savedModel = localStorage.getItem('hett_model');
-let activeModel = savedModel;
-if (!activeModel || activeModel.includes('llama-3.3') || activeModel.includes('compound') || activeModel.includes('mini')) {
-  activeModel = 'qwen/qwen3.8-27b';
-  localStorage.setItem('hett_model', activeModel);
+const HARDCODED_GROQ_KEY = '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';
+const DEFAULT_MODEL = 'qwen/qwen3.8-27b';
+
+// Auto-repair API Key
+let currentKey = localStorage.getItem('hett_api_key');
+if (!currentKey || currentKey.trim() === '' || currentKey === 'undefined' || currentKey === 'null') {
+  currentKey = HARDCODED_GROQ_KEY;
+  localStorage.setItem('hett_api_key', currentKey);
+}
+
+// Auto-repair Model (only qwen/qwen3.8-27b supports both Vision + Text on this Groq key)
+let currentModel = localStorage.getItem('hett_model');
+if (!currentModel || currentModel.includes('llama-3.3') || currentModel.includes('compound') || currentModel.includes('gemini') || currentModel.includes('gpt-4')) {
+  currentModel = DEFAULT_MODEL;
+  localStorage.setItem('hett_model', currentModel);
+}
+
+// Auto-repair AI Mode
+let currentMode = localStorage.getItem('hett_ai_mode');
+if (!currentMode || currentMode === 'offline' || (currentKey && currentKey.startsWith('gsk_'))) {
+  currentMode = 'groq';
+  localStorage.setItem('hett_ai_mode', 'groq');
 }
 
 const STATE = {
   theme: localStorage.getItem('hett_theme') || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
   font: localStorage.getItem('hett_font') || 'sans',
   nickname: localStorage.getItem('hett_nickname') || 'User',
-  aiMode: localStorage.getItem('hett_ai_mode') || 'groq',
-  apiKey: localStorage.getItem('hett_api_key') || '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',
-  modelName: activeModel,
+  aiMode: currentMode,
+  apiKey: currentKey,
+  modelName: currentModel,
   isGenerating: false,
   messages: [],
   currentAttachment: null // { type: 'image' | 'pdf', name: string, size: string, dataUrl?: string, text?: string, pages?: number }
@@ -56,7 +72,7 @@ const DOM = {
   userInput: document.getElementById('userInput'),
   sendBtn: document.getElementById('sendBtn'),
   toast: document.getElementById('toast'),
-  // Attachment UI
+  // Attachment Elements
   fileAttachmentInput: document.getElementById('fileAttachmentInput'),
   attachFileBtn: document.getElementById('attachFileBtn'),
   attachmentTray: document.getElementById('attachmentTray'),
@@ -101,7 +117,7 @@ function applyFont(font) {
 }
 
 // ---------------------------------------------------------------------------
-// PDF & Image Processing
+// Image Optimization & PDF Extraction
 // ---------------------------------------------------------------------------
 function formatFileSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -109,18 +125,65 @@ function formatFileSize(bytes) {
   return (bytes / 1048576).toFixed(1) + ' MB';
 }
 
-function readFileAsDataUrl(file) {
+/**
+ * Optimizes an image using HTML5 Canvas:
+ * - Ensures dimensions are at least 64x64 (Groq requires min 32px)
+ * - Scales down excessively large images to max 1280px to avoid body size limits
+ * - Compresses to lightweight JPEG/PNG Data URL
+ */
+function optimizeImageFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Failed to read file.'));
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+
+        // Ensure minimum 64px for Groq compatibility
+        if (width < 64) width = 64;
+        if (height < 64) height = 64;
+
+        // Scale down if exceeds 1280px
+        const maxDim = 1280;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+
+        // Draw image onto canvas
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Export as JPEG with 0.88 quality
+        const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        resolve(optimizedDataUrl);
+      };
+      img.onerror = () => reject(new Error('Invalid image file.'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error('Failed to read image file.'));
     reader.readAsDataURL(file);
   });
 }
 
+/**
+ * Extracts text from PDF files using Mozilla pdf.js
+ */
 async function extractTextFromPdf(file) {
   if (!window.pdfjsLib) {
-    throw new Error('PDF.js library is loading. Please wait 2 seconds and re-attach.');
+    throw new Error('PDF.js library is loading. Please wait a moment and try again.');
   }
 
   const arrayBuffer = await file.arrayBuffer();
@@ -128,7 +191,7 @@ async function extractTextFromPdf(file) {
   const pdf = await loadingTask.promise;
 
   let fullText = '';
-  const maxPagesToRead = Math.min(pdf.numPages, 30); // Read up to 30 pages
+  const maxPagesToRead = Math.min(pdf.numPages, 30);
 
   for (let i = 1; i <= maxPagesToRead; i++) {
     const page = await pdf.getPage(i);
@@ -160,9 +223,8 @@ async function processSelectedFile(file) {
     return;
   }
 
-  // Max 20MB
-  if (file.size > 20 * 1024 * 1024) {
-    showToast('File size exceeds 20MB limit.');
+  if (file.size > 25 * 1024 * 1024) {
+    showToast('File size exceeds 25MB limit.');
     return;
   }
 
@@ -170,7 +232,7 @@ async function processSelectedFile(file) {
 
   try {
     if (isImage) {
-      const dataUrl = await readFileAsDataUrl(file);
+      const dataUrl = await optimizeImageFile(file);
       setAttachment({
         type: 'image',
         name: file.name || 'Image',
@@ -180,9 +242,6 @@ async function processSelectedFile(file) {
       showToast('Image attached 📸');
     } else if (isPdf) {
       const { text, pages } = await extractTextFromPdf(file);
-      if (!text || text.length === 0) {
-        showToast('Notice: This PDF seems to contain scanned images without text layer.');
-      }
       setAttachment({
         type: 'pdf',
         name: file.name || 'Document.pdf',
@@ -247,7 +306,6 @@ function clearAttachment() {
 function formatText(raw) {
   if (!raw) return '';
 
-  // Escape HTML
   let escaped = raw
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -408,15 +466,14 @@ function generateOfflineResponse(userPrompt, attachment = null) {
   const name = STATE.nickname || 'Friend';
 
   if (attachment && attachment.type === 'image') {
-    return `I received your image (**${attachment.name}**)! 📸\n\nTo get a full, deep AI description with vision analysis, ensure your Groq or Gemini API key is connected in ⚙️ **Settings**. In offline mode, I can confirm the image loaded successfully at ${attachment.size}.`;
+    return `I received your image (**${attachment.name}**)! 📸\n\nTo get a full, deep AI description with vision analysis, ensure your Groq key is connected in ⚙️ **Settings**. In offline mode, I can confirm the image loaded successfully at ${attachment.size}.`;
   }
 
   if (attachment && attachment.type === 'pdf') {
     const snippet = (attachment.text || '').slice(0, 500);
-    return `I received your PDF document (**${attachment.name}** with ${attachment.pages} pages)! 📄\n\n**Document Preview:**\n> ${snippet || 'No readable text layer found.'}\n\n*Connect your Groq or Gemini key in ⚙️ Settings for in-depth intelligent analysis.*`;
+    return `I received your PDF document (**${attachment.name}** with ${attachment.pages} pages)! 📄\n\n**Document Preview:**\n> ${snippet || 'No readable text layer found.'}\n\n*Connect your Groq key in ⚙️ Settings for in-depth intelligent analysis.*`;
   }
 
-  // Greetings
   if (/^(hi|hello|hey|greetings|good morning|good afternoon)/i.test(query)) {
     return `Hello, ${name}! 👋 How can I assist you today? You can ask questions, paste images directly with Ctrl+V, or upload PDFs with the 📎 button!`;
   }
@@ -425,7 +482,7 @@ function generateOfflineResponse(userPrompt, attachment = null) {
 }
 
 // ---------------------------------------------------------------------------
-// Live API Handlers (Groq, Gemini, OpenAI)
+// Live API Handlers (Groq Qwen 3.8 27B Vision & Text)
 // ---------------------------------------------------------------------------
 const SYSTEM_INSTRUCTION = `You are Hett, a direct, concise, and highly capable AI assistant.
 - When an image is provided: Provide an exhaustive, deep, and complete description of everything in the image. Cover the main subject, background, text/words visible (OCR), colors, composition, setting, and notable details.
@@ -440,7 +497,7 @@ async function fetchGroq(prompt, attachment = null) {
     { role: 'system', content: SYSTEM_INSTRUCTION }
   ];
 
-  // Include recent conversation context (text only for previous turns)
+  // Include recent conversation context
   STATE.messages.slice(-4).forEach(m => {
     if (m.content) {
       messages.push({
@@ -468,7 +525,7 @@ async function fetchGroq(prompt, attachment = null) {
       : "Please read this attached PDF document carefully and provide a comprehensive summary, key findings, and highlight important points.";
 
     const textContent = attachment.text && attachment.text.length > 0 
-      ? attachment.text.slice(0, 60000) 
+      ? attachment.text.slice(0, 40000) 
       : "[Notice: No readable text could be extracted from this PDF. It might contain scanned images.]";
 
     currentContent = `Document Attached: ${attachment.name} (${attachment.pages} pages)\n\n--- Document Text Content ---\n${textContent}\n\n--- User Request ---\n${userText}`;
@@ -478,14 +535,15 @@ async function fetchGroq(prompt, attachment = null) {
 
   messages.push({ role: 'user', content: currentContent });
 
-  // Use Qwen 3.8 27B which has verified vision and text support on Groq
-  const modelToUse = STATE.modelName || 'qwen/qwen3.8-27b';
+  // Guarantee key and model
+  const apiKeyToUse = STATE.apiKey || HARDCODED_GROQ_KEY;
+  const modelToUse = DEFAULT_MODEL; // qwen/qwen3.8-27b has full verified vision and text support
 
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${STATE.apiKey}`
+      'Authorization': `Bearer ${apiKeyToUse}`
     },
     body: JSON.stringify({
       model: modelToUse,
@@ -496,60 +554,13 @@ async function fetchGroq(prompt, attachment = null) {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    const errMsg = err.error?.message || `Groq error status ${res.status}`;
+    const errMsg = err.error?.message || `Groq status ${res.status}: ${res.statusText}`;
     throw new Error(errMsg);
   }
 
   const data = await res.json();
   const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new Error('No response text received from Groq.');
-  return text;
-}
-
-async function fetchGemini(prompt, attachment = null) {
-  const model = STATE.modelName && STATE.modelName.includes('gemini') ? STATE.modelName : 'gemini-1.5-flash';
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${STATE.apiKey}`;
-
-  const parts = [];
-
-  if (attachment && attachment.type === 'image') {
-    // Extract base64 without prefix
-    const matches = attachment.dataUrl.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-    if (matches) {
-      parts.push({
-        inlineData: {
-          mimeType: matches[1],
-          data: matches[2]
-        }
-      });
-    }
-    const userText = prompt && prompt.trim().length > 0
-      ? prompt
-      : "Please analyze this image thoroughly and provide a complete, detailed description of everything visible in it.";
-    parts.push({ text: `${SYSTEM_INSTRUCTION}\n\n${userText}` });
-  } else if (attachment && attachment.type === 'pdf') {
-    const userText = prompt && prompt.trim().length > 0 ? prompt : "Please provide a comprehensive summary and key takeaways of this PDF.";
-    parts.push({
-      text: `${SYSTEM_INSTRUCTION}\n\nAttached Document: ${attachment.name}\n\nContent:\n${attachment.text.slice(0, 60000)}\n\nUser Request: ${userText}`
-    });
-  } else {
-    parts.push({ text: `${SYSTEM_INSTRUCTION}\n\n${prompt}` });
-  }
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ role: 'user', parts }] })
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error?.message || `Gemini status ${res.status}`);
-  }
-
-  const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error('Empty response from Gemini API.');
+  if (!text) throw new Error('Empty response from Groq API.');
   return text;
 }
 
@@ -584,10 +595,10 @@ async function handleSend(rawText) {
 
   try {
     let reply = '';
-    if (STATE.aiMode === 'groq' && STATE.apiKey) {
+    const key = STATE.apiKey || HARDCODED_GROQ_KEY;
+
+    if (key) {
       reply = await fetchGroq(text, attachment);
-    } else if (STATE.aiMode === 'gemini' && STATE.apiKey) {
-      reply = await fetchGemini(text, attachment);
     } else {
       const delay = Math.min(1200, Math.max(500, (text.length || 20) * 15));
       await new Promise(r => setTimeout(r, delay));
@@ -601,7 +612,7 @@ async function handleSend(rawText) {
     setTyping(false);
     const fallback = generateOfflineResponse(text, attachment);
     appendMessage('assistant', `⚠️ **API Error**: ${err.message}\n\n*Fallback response:*\n\n${fallback}`);
-    showToast('API issue: ' + err.message.slice(0, 40));
+    showToast('API issue: ' + err.message.slice(0, 45));
   } finally {
     STATE.isGenerating = false;
     DOM.sendBtn.disabled = false;
@@ -613,11 +624,11 @@ async function handleSend(rawText) {
 // Settings Modal
 // ---------------------------------------------------------------------------
 function openSettings() {
-  DOM.aiModeSelect.value = STATE.aiMode;
-  DOM.apiKeyInput.value = STATE.apiKey;
-  DOM.modelInput.value = STATE.modelName;
-  DOM.userNickname.value = STATE.nickname;
-  DOM.fontSelect.value = STATE.font;
+  DOM.aiModeSelect.value = STATE.aiMode || 'groq';
+  DOM.apiKeyInput.value = STATE.apiKey || HARDCODED_GROQ_KEY;
+  DOM.modelInput.value = STATE.modelName || DEFAULT_MODEL;
+  DOM.userNickname.value = STATE.nickname || 'User';
+  DOM.fontSelect.value = STATE.font || 'sans';
   updateSettingsUI();
   DOM.settingsModal.classList.remove('hidden');
 }
@@ -637,21 +648,15 @@ function updateSettingsUI() {
   if (mode === 'groq') {
     if (engineHint) engineHint.textContent = 'Groq delivers ultra-fast responses with native Vision (Images) and Text via Qwen 3.8 27B.';
     DOM.apiKeyInput.placeholder = 'Paste your Groq API key (starts with gsk_...)';
-    if (!DOM.modelInput.value || DOM.modelInput.value.includes('gemini') || DOM.modelInput.value.includes('compound') || DOM.modelInput.value.includes('llama')) {
-      DOM.modelInput.value = 'qwen/qwen3.8-27b';
-    }
+    DOM.modelInput.value = DEFAULT_MODEL;
   } else if (mode === 'gemini') {
     if (engineHint) engineHint.textContent = 'Google Gemini API with multimodal vision support.';
     DOM.apiKeyInput.placeholder = 'Paste your Gemini API key...';
-    if (!DOM.modelInput.value || DOM.modelInput.value.includes('qwen') || DOM.modelInput.value.includes('compound')) {
-      DOM.modelInput.value = 'gemini-1.5-flash';
-    }
+    DOM.modelInput.value = 'gemini-1.5-flash';
   } else if (mode === 'openai') {
     if (engineHint) engineHint.textContent = 'OpenAI or compatible vision API endpoint.';
     DOM.apiKeyInput.placeholder = 'Paste your OpenAI key...';
-    if (!DOM.modelInput.value || DOM.modelInput.value.includes('qwen')) {
-      DOM.modelInput.value = 'gpt-4o-mini';
-    }
+    DOM.modelInput.value = 'gpt-4o-mini';
   } else {
     if (engineHint) engineHint.textContent = 'The built-in engine operates locally without requiring an API key.';
   }
@@ -659,13 +664,8 @@ function updateSettingsUI() {
 
 function saveSettings() {
   STATE.aiMode = DOM.aiModeSelect.value;
-  STATE.apiKey = DOM.apiKeyInput.value.trim();
-
-  let defaultModel = 'qwen/qwen3.8-27b';
-  if (STATE.aiMode === 'gemini') defaultModel = 'gemini-1.5-flash';
-  if (STATE.aiMode === 'openai') defaultModel = 'gpt-4o-mini';
-
-  STATE.modelName = DOM.modelInput.value.trim() || defaultModel;
+  STATE.apiKey = DOM.apiKeyInput.value.trim() || HARDCODED_GROQ_KEY;
+  STATE.modelName = DEFAULT_MODEL;
   STATE.nickname = DOM.userNickname.value.trim() || 'User';
   STATE.font = DOM.fontSelect.value;
 
