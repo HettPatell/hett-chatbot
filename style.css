@@ -504,6 +504,122 @@ html, body {
   font-size: 1.25rem;
 }
 
+/* Video & Audio Message Attachments */
+.msg-video-attachment {
+  margin-bottom: 0.65rem;
+  max-width: 100%;
+}
+
+.msg-video-attachment video {
+  width: 100%;
+  max-width: 480px;
+  max-height: 280px;
+  border-radius: 10px;
+  border: 1px solid var(--border-main);
+  background-color: #000;
+  display: block;
+}
+
+.msg-audio-attachment {
+  margin-bottom: 0.65rem;
+  width: 100%;
+  max-width: 360px;
+}
+
+.msg-audio-attachment audio {
+  width: 100%;
+  height: 38px;
+  border-radius: 8px;
+}
+
+/* Attachment Popover Menu */
+.attachment-menu {
+  position: absolute;
+  bottom: calc(100% - 10px);
+  left: 1.4rem;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-main);
+  border-radius: 14px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+  padding: 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  z-index: 60;
+  min-width: 230px;
+  animation: popoverSlideUp 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.attach-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.8rem;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--current-font);
+  transition: var(--transition-fast);
+  width: 100%;
+}
+
+.attach-menu-item:hover {
+  background-color: var(--bg-hover);
+  transform: translateX(2px);
+}
+
+.menu-icon {
+  font-size: 1.3rem;
+  flex-shrink: 0;
+}
+
+.menu-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.menu-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.menu-desc {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+@keyframes popoverSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Streaming Cursor (Word-by-word typing effect) */
+.streaming-cursor {
+  display: inline-block;
+  width: 3px;
+  height: 1em;
+  background-color: var(--tag-hett);
+  vertical-align: -2px;
+  margin-left: 2px;
+  animation: cursorBlink 0.7s infinite;
+}
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
 .send-btn {
   background-color: var(--send-btn-bg);
   border: 1px solid var(--send-btn-bg);

@@ -11,15 +11,15 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   
-  <!-- Mozilla PDF.js for reading PDF files -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Local Mozilla PDF.js for 100% reliable PDF reading (No CORS / Worker blocks) -->
+  <script src="pdf.min.js"></script>
   <script>
     if (window.pdfjsLib) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
     }
   </script>
 
-  <link rel="stylesheet" href="style.css?v=2.2">
+  <link rel="stylesheet" href="style.css?v=3.0">
 </head>
 <body>
   <!-- App Container -->
@@ -52,6 +52,38 @@
 
       <!-- Input Area -->
       <footer class="footer">
+        <!-- Attachment Popover Menu (Opens above 📎) -->
+        <div id="attachmentMenu" class="attachment-menu hidden" role="menu" aria-label="Attach options">
+          <button type="button" class="attach-menu-item" id="menuItemImage" role="menuitem">
+            <span class="menu-icon">🖼️</span>
+            <div class="menu-text">
+              <span class="menu-title">Photo / Image</span>
+              <span class="menu-desc">PNG, JPG, WebP, GIF</span>
+            </div>
+          </button>
+          <button type="button" class="attach-menu-item" id="menuItemPdf" role="menuitem">
+            <span class="menu-icon">📄</span>
+            <div class="menu-text">
+              <span class="menu-title">Document / PDF</span>
+              <span class="menu-desc">PDF, TXT documents</span>
+            </div>
+          </button>
+          <button type="button" class="attach-menu-item" id="menuItemVideo" role="menuitem">
+            <span class="menu-icon">🎥</span>
+            <div class="menu-text">
+              <span class="menu-title">Video File</span>
+              <span class="menu-desc">MP4, WebM, MOV</span>
+            </div>
+          </button>
+          <button type="button" class="attach-menu-item" id="menuItemAudio" role="menuitem">
+            <span class="menu-icon">🎵</span>
+            <div class="menu-text">
+              <span class="menu-title">Audio / Voice</span>
+              <span class="menu-desc">MP3, WAV, M4A, OGG</span>
+            </div>
+          </button>
+        </div>
+
         <!-- Attachment Preview Tray -->
         <div id="attachmentTray" class="attachment-tray hidden">
           <div id="attachmentPreview" class="attachment-preview"></div>
@@ -59,16 +91,19 @@
         </div>
 
         <form id="chatForm" class="chat-form">
-          <!-- Hidden File Input for Image & PDF -->
-          <input type="file" id="fileAttachmentInput" accept="image/*,application/pdf" style="display: none;">
+          <!-- Hidden Inputs for Each Media Type -->
+          <input type="file" id="imageFileInput" accept="image/*" style="display: none;">
+          <input type="file" id="pdfFileInput" accept=".pdf,text/plain" style="display: none;">
+          <input type="file" id="videoFileInput" accept="video/*" style="display: none;">
+          <input type="file" id="audioFileInput" accept="audio/*" style="display: none;">
 
           <!-- Attach File Button -->
-          <button type="button" id="attachFileBtn" class="attach-btn" title="Attach an Image or PDF (or drag & drop / paste)" aria-label="Attach file">📎</button>
+          <button type="button" id="attachFileBtn" class="attach-btn" title="Add Image, PDF, Video or Audio" aria-label="Attach file">📎</button>
 
           <textarea 
             id="userInput" 
             class="chat-textarea" 
-            placeholder="Type a message or share an Image / PDF..." 
+            placeholder="Type a message or attach Image, PDF, Video, Audio..." 
             rows="1" 
             maxlength="2500" 
             aria-label="Message to Hett"></textarea>
@@ -136,6 +171,6 @@
   <!-- Minimal Toast Notification -->
   <div id="toast" class="toast hidden" aria-live="assertive"></div>
 
-  <script src="app.js?v=2.2"></script>
+  <script src="app.js?v=3.0"></script>
 </body>
 </html>

@@ -1,10 +1,11 @@
 /**
- * Hett — Multimodal Text & Vision Chatbot Logic
+ * Hett — Multimodal Chatbot with Live Streaming
  * Features:
- * - Ultra-fast Groq Qwen 3.8 27B Vision + Text integration
- * - Automatic image resizing & canvas optimization for fast processing
- * - PDF document upload & client-side text extraction (pdf.js)
- * - Clipboard screenshot paste (Ctrl + V) & Drag-and-drop file upload
+ * - 100% Reliable Local PDF.js document reader (zero cross-origin worker blocks)
+ * - Attachment Popover Menu on 📎 click (Image, PDF, Video, Audio)
+ * - Real-time Word-by-Word Live Streaming (Groq SSE stream: true)
+ * - Native Groq Audio Transcription (Whisper Large V3 Turbo)
+ * - Native Groq Video Keyframe Vision & Video Player
  * - Auto-repair of broken or outdated local storage settings
  */
 
@@ -14,6 +15,11 @@
 const HARDCODED_GROQ_KEY = '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';
 const DEFAULT_MODEL = 'qwen/qwen3.8-27b';
 
+// Configure local PDF.js worker
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+}
+
 // Auto-repair API Key
 let currentKey = localStorage.getItem('hett_api_key');
 if (!currentKey || currentKey.trim() === '' || currentKey === 'undefined' || currentKey === 'null') {
@@ -21,7 +27,7 @@ if (!currentKey || currentKey.trim() === '' || currentKey === 'undefined' || cur
   localStorage.setItem('hett_api_key', currentKey);
 }
 
-// Auto-repair Model (only qwen/qwen3.8-27b supports both Vision + Text on this Groq key)
+// Auto-repair Model
 let currentModel = localStorage.getItem('hett_model');
 if (!currentModel || currentModel.includes('llama-3.3') || currentModel.includes('compound') || currentModel.includes('gemini') || currentModel.includes('gpt-4')) {
   currentModel = DEFAULT_MODEL;
@@ -44,7 +50,7 @@ const STATE = {
   modelName: currentModel,
   isGenerating: false,
   messages: [],
-  currentAttachment: null // { type: 'image' | 'pdf', name: string, size: string, dataUrl?: string, text?: string, pages?: number }
+  currentAttachment: null // { type: 'image' | 'pdf' | 'video' | 'audio', name, size, dataUrl, text, pages, file, keyframeUrl }
 };
 
 // ---------------------------------------------------------------------------
@@ -72,9 +78,17 @@ const DOM = {
   userInput: document.getElementById('userInput'),
   sendBtn: document.getElementById('sendBtn'),
   toast: document.getElementById('toast'),
-  // Attachment Elements
-  fileAttachmentInput: document.getElementById('fileAttachmentInput'),
+  // Attachment Popover Menu & Inputs
+  attachmentMenu: document.getElementById('attachmentMenu'),
   attachFileBtn: document.getElementById('attachFileBtn'),
+  menuItemImage: document.getElementById('menuItemImage'),
+  menuItemPdf: document.getElementById('menuItemPdf'),
+  menuItemVideo: document.getElementById('menuItemVideo'),
+  menuItemAudio: document.getElementById('menuItemAudio'),
+  imageFileInput: document.getElementById('imageFileInput'),
+  pdfFileInput: document.getElementById('pdfFileInput'),
+  videoFileInput: document.getElementById('videoFileInput'),
+  audioFileInput: document.getElementById('audioFileInput'),
   attachmentTray: document.getElementById('attachmentTray'),
   attachmentPreview: document.getElementById('attachmentPreview'),
   removeAttachmentBtn: document.getElementById('removeAttachmentBtn')
@@ -117,7 +131,7 @@ function applyFont(font) {
 }
 
 // ---------------------------------------------------------------------------
-// Image Optimization & PDF Extraction
+// File Pre-Processing (Image, PDF, Video, Audio)
 // ---------------------------------------------------------------------------
 function formatFileSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -126,10 +140,7 @@ function formatFileSize(bytes) {
 }
 
 /**
- * Optimizes an image using HTML5 Canvas:
- * - Ensures dimensions are at least 64x64 (Groq requires min 32px)
- * - Scales down excessively large images to max 1280px to avoid body size limits
- * - Compresses to lightweight JPEG/PNG Data URL
+ * Optimizes an image using HTML5 Canvas (min 64px, max 1280px)
  */
 function optimizeImageFile(file) {
   return new Promise((resolve, reject) => {
@@ -140,11 +151,9 @@ function optimizeImageFile(file) {
         let width = img.width;
         let height = img.height;
 
-        // Ensure minimum 64px for Groq compatibility
         if (width < 64) width = 64;
         if (height < 64) height = 64;
 
-        // Scale down if exceeds 1280px
         const maxDim = 1280;
         if (width > maxDim || height > maxDim) {
           if (width > height) {
@@ -160,15 +169,11 @@ function optimizeImageFile(file) {
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext('2d');
-
-        // Draw image onto canvas
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
 
-        // Export as JPEG with 0.88 quality
-        const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
-        resolve(optimizedDataUrl);
+        resolve(canvas.toDataURL('image/jpeg', 0.88));
       };
       img.onerror = () => reject(new Error('Invalid image file.'));
       img.src = e.target.result;
@@ -179,26 +184,37 @@ function optimizeImageFile(file) {
 }
 
 /**
- * Extracts text from PDF files using Mozilla pdf.js
+ * Robust Client-Side PDF text extraction using local pdf.min.js & pdf.worker.min.js
  */
 async function extractTextFromPdf(file) {
   if (!window.pdfjsLib) {
-    throw new Error('PDF.js library is loading. Please wait a moment and try again.');
+    throw new Error('PDF.js library is not available. Please refresh the page.');
   }
 
-  const arrayBuffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-  const pdf = await loadingTask.promise;
+  // Ensure local worker is set
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
 
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLib.getDocument({
+    data: arrayBuffer,
+    cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
+    cMapPacked: true
+  });
+
+  const pdf = await loadingTask.promise;
   let fullText = '';
   const maxPagesToRead = Math.min(pdf.numPages, 30);
 
   for (let i = 1; i <= maxPagesToRead; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items.map(item => item.str).join(' ');
-    if (pageText.trim().length > 0) {
-      fullText += `[Page ${i}]\n${pageText}\n\n`;
+    try {
+      const page = await pdf.getPage(i);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items.map(item => item.str).join(' ');
+      if (pageText.trim().length > 0) {
+        fullText += `[Page ${i}]\n${pageText}\n\n`;
+      }
+    } catch (e) {
+      console.warn(`Could not read page ${i}:`, e);
     }
   }
 
@@ -212,19 +228,57 @@ async function extractTextFromPdf(file) {
   };
 }
 
-async function processSelectedFile(file) {
+/**
+ * Extracts a keyframe snapshot from a video file using HTML5 <video> & <canvas>
+ */
+function extractVideoKeyframe(file) {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    const objectUrl = URL.createObjectURL(file);
+    video.src = objectUrl;
+    video.muted = true;
+    video.playsInline = true;
+
+    video.onloadedmetadata = () => {
+      // Seek to 25% of duration or 1s
+      video.currentTime = Math.min(1.5, video.duration / 3);
+    };
+
+    video.onseeked = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.min(640, video.videoWidth || 640);
+      canvas.height = Math.round((canvas.width * (video.videoHeight || 360)) / (video.videoWidth || 640));
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const keyframeDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      resolve({
+        objectUrl: objectUrl,
+        keyframeDataUrl: keyframeDataUrl,
+        duration: Math.round(video.duration)
+      });
+    };
+
+    video.onerror = () => {
+      resolve({ objectUrl: objectUrl, keyframeDataUrl: null, duration: 0 });
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// File Router & Processing
+// ---------------------------------------------------------------------------
+async function processSelectedFile(file, forcedType = null) {
   if (!file) return;
 
-  const isImage = file.type.startsWith('image/');
-  const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+  hideAttachmentMenu();
 
-  if (!isImage && !isPdf) {
-    showToast('Please attach an Image (PNG, JPG, WebP) or PDF file.');
-    return;
-  }
+  const isImage = forcedType === 'image' || file.type.startsWith('image/');
+  const isPdf = forcedType === 'pdf' || file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf') || file.type === 'text/plain';
+  const isVideo = forcedType === 'video' || file.type.startsWith('video/');
+  const isAudio = forcedType === 'audio' || file.type.startsWith('audio/');
 
-  if (file.size > 25 * 1024 * 1024) {
-    showToast('File size exceeds 25MB limit.');
+  if (!isImage && !isPdf && !isVideo && !isAudio) {
+    showToast('Unsupported file type. Please attach an Image, PDF, Video, or Audio.');
     return;
   }
 
@@ -235,13 +289,22 @@ async function processSelectedFile(file) {
       const dataUrl = await optimizeImageFile(file);
       setAttachment({
         type: 'image',
-        name: file.name || 'Image',
+        name: file.name || 'Photo',
         size: formatFileSize(file.size),
         dataUrl: dataUrl
       });
       showToast('Image attached 📸');
     } else if (isPdf) {
-      const { text, pages } = await extractTextFromPdf(file);
+      let text = '';
+      let pages = 1;
+      if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+        text = await file.text();
+      } else {
+        const result = await extractTextFromPdf(file);
+        text = result.text;
+        pages = result.pages;
+      }
+
       setAttachment({
         type: 'pdf',
         name: file.name || 'Document.pdf',
@@ -249,16 +312,38 @@ async function processSelectedFile(file) {
         text: text,
         pages: pages
       });
-      showToast(`PDF attached 📄 (${pages} pages ready)`);
+      showToast(`PDF ready 📄 (${pages} pages extracted)`);
+    } else if (isVideo) {
+      const { objectUrl, keyframeDataUrl, duration } = await extractVideoKeyframe(file);
+      setAttachment({
+        type: 'video',
+        name: file.name || 'Video',
+        size: formatFileSize(file.size),
+        objectUrl: objectUrl,
+        keyframeUrl: keyframeDataUrl,
+        duration: duration,
+        file: file
+      });
+      showToast(`Video attached 🎥 (${duration}s)`);
+    } else if (isAudio) {
+      const objectUrl = URL.createObjectURL(file);
+      setAttachment({
+        type: 'audio',
+        name: file.name || 'Audio',
+        size: formatFileSize(file.size),
+        objectUrl: objectUrl,
+        file: file
+      });
+      showToast('Audio attached 🎵 (Ready to transcribe)');
     }
   } catch (err) {
-    console.error('File processing error:', err);
-    showToast('Could not process file: ' + err.message);
+    console.error('File process error:', err);
+    showToast('Error reading file: ' + err.message);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Attachment UI State & Tray
+// Attachment Tray Management
 // ---------------------------------------------------------------------------
 function setAttachment(attachment) {
   STATE.currentAttachment = attachment;
@@ -283,7 +368,29 @@ function setAttachment(attachment) {
 
     const meta = document.createElement('div');
     meta.className = 'preview-meta';
-    meta.innerHTML = `<span class="preview-name">${attachment.name}</span><span class="preview-details">PDF • ${attachment.pages || 1} pages • ${attachment.size}</span>`;
+    meta.innerHTML = `<span class="preview-name">${attachment.name}</span><span class="preview-details">Document • ${attachment.pages || 1} pages • ${attachment.size}</span>`;
+
+    DOM.attachmentPreview.appendChild(icon);
+    DOM.attachmentPreview.appendChild(meta);
+  } else if (attachment.type === 'video') {
+    const icon = document.createElement('span');
+    icon.className = 'pdf-icon';
+    icon.textContent = '🎥';
+
+    const meta = document.createElement('div');
+    meta.className = 'preview-meta';
+    meta.innerHTML = `<span class="preview-name">${attachment.name}</span><span class="preview-details">Video • ${attachment.duration || 0}s • ${attachment.size}</span>`;
+
+    DOM.attachmentPreview.appendChild(icon);
+    DOM.attachmentPreview.appendChild(meta);
+  } else if (attachment.type === 'audio') {
+    const icon = document.createElement('span');
+    icon.className = 'pdf-icon';
+    icon.textContent = '🎵';
+
+    const meta = document.createElement('div');
+    meta.className = 'preview-meta';
+    meta.innerHTML = `<span class="preview-name">${attachment.name}</span><span class="preview-details">Audio • ${attachment.size}</span>`;
 
     DOM.attachmentPreview.appendChild(icon);
     DOM.attachmentPreview.appendChild(meta);
@@ -297,7 +404,22 @@ function clearAttachment() {
   STATE.currentAttachment = null;
   DOM.attachmentTray.classList.add('hidden');
   DOM.attachmentPreview.innerHTML = '';
-  DOM.fileAttachmentInput.value = '';
+  DOM.imageFileInput.value = '';
+  DOM.pdfFileInput.value = '';
+  DOM.videoFileInput.value = '';
+  DOM.audioFileInput.value = '';
+}
+
+// ---------------------------------------------------------------------------
+// Popover Menu Toggle
+// ---------------------------------------------------------------------------
+function toggleAttachmentMenu(e) {
+  if (e) e.stopPropagation();
+  DOM.attachmentMenu.classList.toggle('hidden');
+}
+
+function hideAttachmentMenu() {
+  DOM.attachmentMenu.classList.add('hidden');
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +479,7 @@ function formatText(raw) {
 }
 
 // ---------------------------------------------------------------------------
-// Message Rendering
+// Message Rendering (Static & Streaming)
 // ---------------------------------------------------------------------------
 function appendMessage(role, content, attachment = null) {
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -405,6 +527,16 @@ function appendMessage(role, content, attachment = null) {
       pdfBadge.className = 'msg-pdf-attachment';
       pdfBadge.innerHTML = `<span class="pdf-icon">📄</span> <div><strong>${attachment.name}</strong> (${attachment.pages || 1} pages)</div>`;
       body.appendChild(pdfBadge);
+    } else if (attachment.type === 'video') {
+      const videoContainer = document.createElement('div');
+      videoContainer.className = 'msg-video-attachment';
+      videoContainer.innerHTML = `<video controls src="${attachment.objectUrl}"></video>`;
+      body.appendChild(videoContainer);
+    } else if (attachment.type === 'audio') {
+      const audioContainer = document.createElement('div');
+      audioContainer.className = 'msg-audio-attachment';
+      audioContainer.innerHTML = `<audio controls src="${attachment.objectUrl}"></audio>`;
+      body.appendChild(audioContainer);
     }
   }
 
@@ -418,7 +550,6 @@ function appendMessage(role, content, attachment = null) {
   entry.appendChild(headerRow);
   entry.appendChild(body);
 
-  // Copy Action
   if (isHett) {
     const actions = document.createElement('div');
     actions.className = 'message-actions';
@@ -444,6 +575,81 @@ function appendMessage(role, content, attachment = null) {
   STATE.messages.push({ role, content, attachment, time });
 }
 
+/**
+ * Creates an empty streaming message entry and returns an updater function
+ * that updates text live word-by-word with a blinking cursor
+ */
+function createStreamingMessageEntry() {
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  const entry = document.createElement('article');
+  entry.className = 'message-entry';
+
+  const headerRow = document.createElement('div');
+  headerRow.className = 'message-header-row';
+
+  const author = document.createElement('span');
+  author.className = 'message-author author-hett';
+  author.textContent = '🤖 Hett';
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'message-time';
+  timeSpan.textContent = time;
+
+  headerRow.appendChild(author);
+  headerRow.appendChild(timeSpan);
+
+  const body = document.createElement('div');
+  body.className = 'message-body';
+
+  const textDiv = document.createElement('div');
+  const cursor = document.createElement('span');
+  cursor.className = 'streaming-cursor';
+
+  body.appendChild(textDiv);
+  body.appendChild(cursor);
+  entry.appendChild(headerRow);
+  entry.appendChild(body);
+
+  DOM.chatLog.appendChild(entry);
+  scrollToBottom();
+
+  let accumulatedText = '';
+
+  return {
+    appendChunk: (chunk) => {
+      accumulatedText += chunk;
+      textDiv.innerHTML = formatText(accumulatedText);
+      scrollToBottom();
+    },
+    finalize: () => {
+      cursor.remove();
+
+      // Add copy button
+      const actions = document.createElement('div');
+      actions.className = 'message-actions';
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'mini-action-btn';
+      copyBtn.textContent = '📋 Copy';
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(accumulatedText).then(() => {
+          showToast('Copied to clipboard');
+        }).catch(() => {
+          showToast('Failed to copy');
+        });
+      });
+
+      actions.appendChild(copyBtn);
+      entry.appendChild(actions);
+      scrollToBottom();
+
+      STATE.messages.push({ role: 'assistant', content: accumulatedText, time });
+    },
+    getText: () => accumulatedText
+  };
+}
+
 function scrollToBottom() {
   DOM.chatLog.scrollTop = DOM.chatLog.scrollHeight;
 }
@@ -459,45 +665,53 @@ function setTyping(isTyping, customText = 'Hett is thinking...') {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in Text Conversational Engine (Offline Fallback)
+// Audio Transcription (Groq Whisper Large V3 Turbo)
 // ---------------------------------------------------------------------------
-function generateOfflineResponse(userPrompt, attachment = null) {
-  const query = (userPrompt || '').toLowerCase().trim();
-  const name = STATE.nickname || 'Friend';
+async function transcribeAudioWithGroq(audioFile) {
+  const endpoint = 'https://api.groq.com/openai/v1/audio/transcriptions';
+  const apiKey = STATE.apiKey || HARDCODED_GROQ_KEY;
 
-  if (attachment && attachment.type === 'image') {
-    return `I received your image (**${attachment.name}**)! 📸\n\nTo get a full, deep AI description with vision analysis, ensure your Groq key is connected in ⚙️ **Settings**. In offline mode, I can confirm the image loaded successfully at ${attachment.size}.`;
+  const formData = new FormData();
+  formData.append('file', audioFile);
+  formData.append('model', 'whisper-large-v3-turbo');
+  formData.append('response_format', 'json');
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: formData
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Whisper error ${res.status}`);
   }
 
-  if (attachment && attachment.type === 'pdf') {
-    const snippet = (attachment.text || '').slice(0, 500);
-    return `I received your PDF document (**${attachment.name}** with ${attachment.pages} pages)! 📄\n\n**Document Preview:**\n> ${snippet || 'No readable text layer found.'}\n\n*Connect your Groq key in ⚙️ Settings for in-depth intelligent analysis.*`;
-  }
-
-  if (/^(hi|hello|hey|greetings|good morning|good afternoon)/i.test(query)) {
-    return `Hello, ${name}! 👋 How can I assist you today? You can ask questions, paste images directly with Ctrl+V, or upload PDFs with the 📎 button!`;
-  }
-
-  return `Understood, ${name}. I am running in offline mode. For full AI intelligence, deep image analysis, and PDF comprehension, connect your Groq API key in ⚙️ **Settings**!`;
+  const data = await res.json();
+  return data.text || '';
 }
 
 // ---------------------------------------------------------------------------
-// Live API Handlers (Groq Qwen 3.8 27B Vision & Text)
+// Groq Live Streaming API (Server-Sent Events)
 // ---------------------------------------------------------------------------
 const SYSTEM_INSTRUCTION = `You are Hett, a direct, concise, and highly capable AI assistant.
-- When an image is provided: Provide an exhaustive, deep, and complete description of everything in the image. Cover the main subject, background, text/words visible (OCR), colors, composition, setting, and notable details.
-- When a PDF or document is provided: Read the extracted text carefully, answer the user's questions or provide a structured, clear summary with key takeaways.
-- Keep tone direct, insightful, and well-structured using Markdown.`;
+- When an image is provided: Provide an exhaustive, deep, and complete description of everything visible in the image. Cover the main subject, background, visible text (OCR), colors, composition, setting, and details.
+- When a video is provided: Analyze the extracted visual scene and provide an informative overview of the video content.
+- When an audio transcription is provided: Answer or address the spoken query thoughtfully.
+- When a PDF/document is provided: Read the extracted text carefully and provide a structured, clear summary with key takeaways.
+- Format cleanly using standard Markdown.`;
 
-async function fetchGroq(prompt, attachment = null) {
+async function streamGroqResponse(prompt, attachment, onChunk) {
   const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+  const apiKey = STATE.apiKey || HARDCODED_GROQ_KEY;
+  const modelToUse = DEFAULT_MODEL;
 
-  // Build message history
   const messages = [
     { role: 'system', content: SYSTEM_INSTRUCTION }
   ];
 
-  // Include recent conversation context
   STATE.messages.slice(-4).forEach(m => {
     if (m.content) {
       messages.push({
@@ -507,26 +721,41 @@ async function fetchGroq(prompt, attachment = null) {
     }
   });
 
-  // Construct current user content
   let currentContent;
 
   if (attachment && attachment.type === 'image') {
-    const userText = prompt && prompt.trim().length > 0 
-      ? prompt 
+    const userText = prompt && prompt.trim().length > 0
+      ? prompt
       : "Please analyze this image thoroughly and provide a complete, detailed description of everything visible in it, including main objects, any text or labels, colors, and context.";
 
     currentContent = [
       { type: "text", text: userText },
       { type: "image_url", image_url: { url: attachment.dataUrl } }
     ];
+  } else if (attachment && attachment.type === 'video') {
+    const userText = prompt && prompt.trim().length > 0
+      ? prompt
+      : "Please analyze this video keyframe and describe the visual scene, subject, and context.";
+
+    if (attachment.keyframeUrl) {
+      currentContent = [
+        { type: "text", text: `[Video Attachment: ${attachment.name}, duration: ${attachment.duration}s]\n\n${userText}` },
+        { type: "image_url", image_url: { url: attachment.keyframeUrl } }
+      ];
+    } else {
+      currentContent = `[Video Attachment: ${attachment.name}, duration: ${attachment.duration}s]\n\nUser request: ${userText}`;
+    }
+  } else if (attachment && attachment.type === 'audio') {
+    const userText = prompt && prompt.trim().length > 0 ? prompt : "Please respond to this audio transcription.";
+    currentContent = `[Audio Message Transcription: "${attachment.transcription}"]\n\nUser request: ${userText}`;
   } else if (attachment && attachment.type === 'pdf') {
     const userText = prompt && prompt.trim().length > 0
       ? prompt
       : "Please read this attached PDF document carefully and provide a comprehensive summary, key findings, and highlight important points.";
 
-    const textContent = attachment.text && attachment.text.length > 0 
-      ? attachment.text.slice(0, 40000) 
-      : "[Notice: No readable text could be extracted from this PDF. It might contain scanned images.]";
+    const textContent = attachment.text && attachment.text.length > 0
+      ? attachment.text.slice(0, 40000)
+      : "[Notice: No readable text could be extracted from this PDF. It might be a scanned image.]";
 
     currentContent = `Document Attached: ${attachment.name} (${attachment.pages} pages)\n\n--- Document Text Content ---\n${textContent}\n\n--- User Request ---\n${userText}`;
   } else {
@@ -535,33 +764,65 @@ async function fetchGroq(prompt, attachment = null) {
 
   messages.push({ role: 'user', content: currentContent });
 
-  // Guarantee key and model
-  const apiKeyToUse = STATE.apiKey || HARDCODED_GROQ_KEY;
-  const modelToUse = DEFAULT_MODEL; // qwen/qwen3.8-27b has full verified vision and text support
-
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKeyToUse}`
+      'Authorization': `Bearer ${apiKey}`
     },
     body: JSON.stringify({
       model: modelToUse,
       messages: messages,
-      temperature: 0.6
+      temperature: 0.6,
+      stream: true // LIVE STREAMING
     })
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    const errMsg = err.error?.message || `Groq status ${res.status}: ${res.statusText}`;
-    throw new Error(errMsg);
+    throw new Error(err.error?.message || `Groq error status ${res.status}`);
   }
 
-  const data = await res.json();
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new Error('Empty response from Groq API.');
-  return text;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop(); // keep last incomplete line in buffer
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      if (trimmed === 'data: [DONE]') return;
+
+      try {
+        const jsonStr = trimmed.slice(5).trim();
+        const parsed = JSON.parse(jsonStr);
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (delta) {
+          onChunk(delta);
+        }
+      } catch (e) {
+        // partial json chunk, continue
+      }
+    }
+  }
+}
+
+/**
+ * Word-by-word typewriter fallback for simulated offline typing
+ */
+async function streamSimulatedText(text, onChunk) {
+  const words = text.split(' ');
+  for (let i = 0; i < words.length; i++) {
+    onChunk((i === 0 ? '' : ' ') + words[i]);
+    await new Promise(r => setTimeout(r, 22));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -571,15 +832,28 @@ async function handleSend(rawText) {
   const text = (rawText || '').trim();
   const attachment = STATE.currentAttachment;
 
-  // Need either text or attachment
   if ((!text && !attachment) || STATE.isGenerating) return;
 
-  // Reset inputs & tray
+  // Clear inputs & tray
   DOM.userInput.value = '';
   DOM.userInput.style.height = 'auto';
   clearAttachment();
+  hideAttachmentMenu();
 
-  // Show user bubble
+  // If audio attachment, transcribe first
+  if (attachment && attachment.type === 'audio' && attachment.file) {
+    setTyping(true, 'Transcribing audio with Whisper...');
+    try {
+      const transcription = await transcribeAudioWithGroq(attachment.file);
+      attachment.transcription = transcription;
+      showToast('Audio transcribed successfully 🎙️');
+    } catch (e) {
+      console.warn('Whisper transcription failed:', e);
+      attachment.transcription = '[Could not transcribe audio]';
+    }
+  }
+
+  // Render user bubble
   appendMessage('user', text, attachment);
 
   STATE.isGenerating = true;
@@ -587,31 +861,44 @@ async function handleSend(rawText) {
 
   if (attachment && attachment.type === 'image') {
     setTyping(true, 'Hett is analyzing the image...');
+  } else if (attachment && attachment.type === 'video') {
+    setTyping(true, 'Hett is analyzing video frames...');
   } else if (attachment && attachment.type === 'pdf') {
     setTyping(true, 'Hett is reading the PDF...');
   } else {
     setTyping(true, 'Hett is thinking...');
   }
 
+  // Create live streaming bubble
+  const streamEntry = createStreamingMessageEntry();
+
   try {
-    let reply = '';
     const key = STATE.apiKey || HARDCODED_GROQ_KEY;
 
     if (key) {
-      reply = await fetchGroq(text, attachment);
-    } else {
-      const delay = Math.min(1200, Math.max(500, (text.length || 20) * 15));
-      await new Promise(r => setTimeout(r, delay));
-      reply = generateOfflineResponse(text, attachment);
-    }
+      let firstChunkReceived = false;
 
-    setTyping(false);
-    appendMessage('assistant', reply);
+      await streamGroqResponse(text, attachment, (chunk) => {
+        if (!firstChunkReceived) {
+          firstChunkReceived = true;
+          setTyping(false); // remove thinking indicator once streaming begins
+        }
+        streamEntry.appendChunk(chunk);
+      });
+
+      setTyping(false);
+      streamEntry.finalize();
+    } else {
+      setTyping(false);
+      const simulatedText = "Offline Mode: Connect your Groq API key in Settings for live AI answers.";
+      await streamSimulatedText(simulatedText, (chunk) => streamEntry.appendChunk(chunk));
+      streamEntry.finalize();
+    }
   } catch (err) {
-    console.error('API call failed:', err);
+    console.error('Streaming API call failed:', err);
     setTyping(false);
-    const fallback = generateOfflineResponse(text, attachment);
-    appendMessage('assistant', `⚠️ **API Error**: ${err.message}\n\n*Fallback response:*\n\n${fallback}`);
+    streamEntry.appendChunk(`\n\n⚠️ **API Error**: ${err.message}`);
+    streamEntry.finalize();
     showToast('API issue: ' + err.message.slice(0, 45));
   } finally {
     STATE.isGenerating = false;
@@ -646,7 +933,7 @@ function updateSettingsUI() {
   const engineHint = document.getElementById('engineHint');
 
   if (mode === 'groq') {
-    if (engineHint) engineHint.textContent = 'Groq delivers ultra-fast responses with native Vision (Images) and Text via Qwen 3.8 27B.';
+    if (engineHint) engineHint.textContent = 'Groq delivers ultra-fast streaming responses with native Vision (Images, Video) and Whisper Audio.';
     DOM.apiKeyInput.placeholder = 'Paste your Groq API key (starts with gsk_...)';
     DOM.modelInput.value = DEFAULT_MODEL;
   } else if (mode === 'gemini') {
@@ -654,7 +941,7 @@ function updateSettingsUI() {
     DOM.apiKeyInput.placeholder = 'Paste your Gemini API key...';
     DOM.modelInput.value = 'gemini-1.5-flash';
   } else if (mode === 'openai') {
-    if (engineHint) engineHint.textContent = 'OpenAI or compatible vision API endpoint.';
+    if (engineHint) engineHint.textContent = 'OpenAI or compatible API endpoint.';
     DOM.apiKeyInput.placeholder = 'Paste your OpenAI key...';
     DOM.modelInput.value = 'gpt-4o-mini';
   } else {
@@ -703,14 +990,52 @@ function initEvents() {
     }
   });
 
-  // Attach Button & File Input
-  DOM.attachFileBtn.addEventListener('click', () => {
-    DOM.fileAttachmentInput.click();
+  // Attachment Popover Menu Trigger (Click 📎)
+  DOM.attachFileBtn.addEventListener('click', toggleAttachmentMenu);
+
+  // Popover Menu Options
+  DOM.menuItemImage.addEventListener('click', () => {
+    hideAttachmentMenu();
+    DOM.imageFileInput.click();
   });
 
-  DOM.fileAttachmentInput.addEventListener('change', (e) => {
-    const file = e.target.files?.[0];
-    if (file) processSelectedFile(file);
+  DOM.menuItemPdf.addEventListener('click', () => {
+    hideAttachmentMenu();
+    DOM.pdfFileInput.click();
+  });
+
+  DOM.menuItemVideo.addEventListener('click', () => {
+    hideAttachmentMenu();
+    DOM.videoFileInput.click();
+  });
+
+  DOM.menuItemAudio.addEventListener('click', () => {
+    hideAttachmentMenu();
+    DOM.audioFileInput.click();
+  });
+
+  // Close attachment menu if clicking anywhere outside
+  document.addEventListener('click', (e) => {
+    if (!DOM.attachmentMenu.contains(e.target) && e.target !== DOM.attachFileBtn) {
+      hideAttachmentMenu();
+    }
+  });
+
+  // Dedicated File Inputs
+  DOM.imageFileInput.addEventListener('change', (e) => {
+    if (e.target.files?.[0]) processSelectedFile(e.target.files[0], 'image');
+  });
+
+  DOM.pdfFileInput.addEventListener('change', (e) => {
+    if (e.target.files?.[0]) processSelectedFile(e.target.files[0], 'pdf');
+  });
+
+  DOM.videoFileInput.addEventListener('change', (e) => {
+    if (e.target.files?.[0]) processSelectedFile(e.target.files[0], 'video');
+  });
+
+  DOM.audioFileInput.addEventListener('change', (e) => {
+    if (e.target.files?.[0]) processSelectedFile(e.target.files[0], 'audio');
   });
 
   DOM.removeAttachmentBtn.addEventListener('click', clearAttachment);
@@ -743,7 +1068,7 @@ function initEvents() {
         const blob = items[i].getAsFile();
         if (blob) {
           e.preventDefault();
-          processSelectedFile(blob);
+          processSelectedFile(blob, 'image');
           showToast('Image pasted from clipboard 📸');
           break;
         }
