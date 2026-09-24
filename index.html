@@ -35,6 +35,7 @@
         </div>
         
         <nav class="header-controls" aria-label="Controls">
+          <button type="button" id="mcpBtn" class="text-btn" aria-label="Model Context Protocol">🔌 MCP <span id="mcpBadge" class="header-badge">11</span></button>
           <button type="button" id="themeToggleBtn" class="text-btn" aria-label="Toggle theme">☀️ Light</button>
           <button type="button" id="openSettingsBtn" class="text-btn" aria-label="Settings">⚙️ Settings</button>
           <button type="button" id="clearChatBtn" class="text-btn" aria-label="Clear chat">🗑️ Clear</button>
@@ -168,9 +169,142 @@
     </div>
   </div>
 
+  <!-- Model Context Protocol (MCP) Modal -->
+  <div id="mcpModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="mcpHeading">
+    <div class="modal-box modal-box-large">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <h2 id="mcpHeading" class="modal-title">🔌 Model Context Protocol</h2>
+          <span class="modal-subtitle">Anthropic MCP Tool & Context Engine for Real-Time AI</span>
+        </div>
+        <button type="button" id="closeMcpBtn" class="text-btn" aria-label="Close MCP dialog">✕ Close</button>
+      </div>
+
+      <!-- MCP Tab Navigation -->
+      <nav class="mcp-tabs" role="tablist">
+        <button type="button" class="mcp-tab active" data-tab="serversTab" role="tab" aria-selected="true">🛠️ Servers & Tools</button>
+        <button type="button" class="mcp-tab" data-tab="addServerTab" role="tab" aria-selected="false">🔗 Add Server</button>
+        <button type="button" class="mcp-tab" data-tab="memoryTab" role="tab" aria-selected="false">💾 Memory & Notes</button>
+        <button type="button" class="mcp-tab" data-tab="testerTab" role="tab" aria-selected="false">🧪 Tool Tester</button>
+      </nav>
+
+      <div class="modal-body mcp-modal-body">
+        <!-- Tab 1: Servers & Tools -->
+        <div id="serversTab" class="mcp-tab-pane active">
+          <div class="mcp-section-header">
+            <div>
+              <h3 class="mcp-section-title">Active MCP Servers</h3>
+              <p class="mcp-section-desc">Toggle server modules to equip Hett with mathematical computation, live web research, memory, and diagnostics.</p>
+            </div>
+            <span id="mcpActiveCountLabel" class="mcp-count-badge">11 Tools Ready</span>
+          </div>
+
+          <div id="mcpServersList" class="mcp-servers-list">
+            <!-- Dynamic servers rendered by JS -->
+          </div>
+        </div>
+
+        <!-- Tab 2: Add External Server -->
+        <div id="addServerTab" class="mcp-tab-pane hidden">
+          <div class="mcp-section-header">
+            <div>
+              <h3 class="mcp-section-title">Connect External MCP Server</h3>
+              <p class="mcp-section-desc">Connect any remote or local MCP Server via HTTP JSON-RPC 2.0 or Server-Sent Events (SSE).</p>
+            </div>
+          </div>
+
+          <form id="addMcpServerForm" class="mcp-add-form">
+            <div class="field-group">
+              <label for="extServerName">Server Name</label>
+              <input type="text" id="extServerName" class="form-input" placeholder="e.g. Local Windows Host MCP">
+            </div>
+
+            <div class="field-group">
+              <label for="extServerUrl">Server Endpoint URL</label>
+              <div class="input-with-button">
+                <input type="url" id="extServerUrl" class="form-input" placeholder="http://localhost:8000/mcp">
+                <button type="button" id="useLocalHostMcpBtn" class="secondary-text-btn">Use Local Host</button>
+              </div>
+              <span class="field-hint">Supports JSON-RPC 2.0 endpoints implementing initialize, tools/list, and tools/call.</span>
+            </div>
+
+            <div class="field-group">
+              <label for="extServerTransport">Transport Protocol</label>
+              <select id="extServerTransport" class="form-select">
+                <option value="http" selected>HTTP POST (Standard JSON-RPC 2.0)</option>
+                <option value="sse">Server-Sent Events (SSE)</option>
+              </select>
+            </div>
+
+            <div class="mcp-form-actions">
+              <button type="submit" id="connectExtServerBtn" class="primary-text-btn">🔌 Connect & Discover Tools</button>
+            </div>
+
+            <div id="extServerFeedback" class="mcp-feedback hidden"></div>
+          </form>
+        </div>
+
+        <!-- Tab 3: Memory & Notes -->
+        <div id="memoryTab" class="mcp-tab-pane hidden">
+          <div class="mcp-section-header">
+            <div>
+              <h3 class="mcp-section-title">Persistent Memory Storage</h3>
+              <p class="mcp-section-desc">User preferences, notes, and facts stored in browser storage by Hett's save_memory MCP tool.</p>
+            </div>
+            <button type="button" id="clearAllMemoriesBtn" class="danger-text-btn">🗑️ Clear Memories</button>
+          </div>
+
+          <div class="memory-quick-add">
+            <input type="text" id="newMemoryKey" class="form-input" placeholder="Key (e.g. favorite_color)">
+            <input type="text" id="newMemoryValue" class="form-input" placeholder="Value (e.g. Emerald Green)">
+            <button type="button" id="saveManualMemoryBtn" class="secondary-text-btn">Save Note</button>
+          </div>
+
+          <div id="mcpMemoriesList" class="mcp-memories-list">
+            <!-- Dynamic memories rendered by JS -->
+          </div>
+        </div>
+
+        <!-- Tab 4: Tool Tester -->
+        <div id="testerTab" class="mcp-tab-pane hidden">
+          <div class="mcp-section-header">
+            <div>
+              <h3 class="mcp-section-title">Interactive Tool Playground</h3>
+              <p class="mcp-section-desc">Directly test any registered MCP tool and view live JSON-RPC request and response outputs.</p>
+            </div>
+          </div>
+
+          <div class="tester-grid">
+            <div class="field-group">
+              <label for="testerToolSelect">Select MCP Tool</label>
+              <select id="testerToolSelect" class="form-select"></select>
+            </div>
+
+            <div class="field-group">
+              <label for="testerArgsInput">Arguments (JSON format)</label>
+              <textarea id="testerArgsInput" class="form-textarea code-font" rows="3" placeholder='{"expression": "25 * 48"}'></textarea>
+            </div>
+
+            <button type="button" id="runTestToolBtn" class="primary-text-btn">⚡ Execute Tool</button>
+
+            <div class="tester-output-box">
+              <label>Execution Output</label>
+              <pre id="testerOutput" class="tester-pre">Select a tool and click Execute to test.</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="closeMcpFooterBtn" class="primary-text-btn">Done</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Minimal Toast Notification -->
   <div id="toast" class="toast hidden" aria-live="assertive"></div>
 
-  <script src="app.js?v=3.0"></script>
+  <script src="mcp-client.js?v=3.5"></script>
+  <script src="app.js?v=3.5"></script>
 </body>
 </html>

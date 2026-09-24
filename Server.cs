@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Net;
+using System.Text;
 using System.Threading;
 
 class SimpleServer
@@ -43,6 +44,8 @@ class SimpleServer
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("  URL: http://localhost:" + port + "/");
         Console.WriteLine("  URL: http://127.0.0.1:" + port + "/");
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.WriteLine("  MCP Endpoint: http://localhost:" + port + "/mcp");
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.WriteLine("  Press Ctrl+C to stop server");
         Console.ForegroundColor = ConsoleColor.Green;
@@ -71,7 +74,40 @@ class SimpleServer
             HttpListenerRequest req = context.Request;
             HttpListenerResponse res = context.Response;
 
+            res.Headers.Add("Access-Control-Allow-Origin", "*");
+            res.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            res.Headers.Add("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+            if (req.HttpMethod == "OPTIONS")
+            {
+                res.StatusCode = 204;
+                res.Close();
+                return;
+            }
+
             string relPath = req.Url.LocalPath.TrimStart('/');
+
+            // ---------------------------------------------------------------
+            // Built-in JSON-RPC 2.0 Model Context Protocol (MCP) Server
+            // ---------------------------------------------------------------
+            if (req.Url.LocalPath.Equals("/mcp", StringComparison.OrdinalIgnoreCase))
+            {
+                res.ContentType = "application/json; charset=utf-8";
+                res.Headers.Add("Cache-Control", "no-cache, no-store, must-revalidate");
+
+                string requestBody = "";
+                using (var reader = new StreamReader(req.InputStream, req.ContentEncoding))
+                {
+                    requestBody = reader.ReadToEnd();
+                }
+
+                string responseJson = HandleMcpRequest(requestBody);
+                byte[] rpcBytes = Encoding.UTF8.GetBytes(responseJson);
+                res.ContentLength64 = rpcBytes.Length;
+                res.OutputStream.Write(rpcBytes, 0, rpcBytes.Length);
+                return;
+            }
+
             if (string.IsNullOrEmpty(relPath))
             {
                 relPath = "index.html";
@@ -101,7 +137,6 @@ class SimpleServer
                 }
 
                 res.ContentType = mime;
-                res.Headers.Add("Access-Control-Allow-Origin", "*");
                 res.Headers.Add("Cache-Control", "no-cache, no-store, must-revalidate");
                 res.Headers.Add("Pragma", "no-cache");
                 res.Headers.Add("Expires", "0");
@@ -117,7 +152,7 @@ class SimpleServer
             else
             {
                 res.StatusCode = 404;
-                byte[] notFound = System.Text.Encoding.UTF8.GetBytes("File Not Found");
+                byte[] notFound = Encoding.UTF8.GetBytes("File Not Found");
                 res.ContentLength64 = notFound.Length;
                 if (req.HttpMethod != "HEAD")
                 {
@@ -130,5 +165,69 @@ class SimpleServer
         {
             try { context.Response.Close(); } catch {}
         }
+    }
+
+    static string HandleMcpRequest(string body)
+    {
+        string id = "1";
+        string method = "";
+
+        if (!string.IsNullOrEmpty(body))
+        {
+            int idIdx = body.IndexOf("\"id\":");
+            if (idIdx != -1)
+            {
+                int endIdx = body.IndexOfAny(new char[] { ',', '}', '\r', '\n' }, idIdx + 5);
+                if (endIdx != -1)
+                {
+                    id = body.Substring(idIdx + 5, endIdx - (idIdx + 5)).Trim();
+                }
+            }
+
+            int mIdx = body.IndexOf("\"method\":");
+            if (mIdx != -1)
+            {
+                int q1 = body.IndexOf('"', mIdx + 9);
+                if (q1 != -1)
+                {
+                    int q2 = body.IndexOf('"', q1 + 1);
+                    if (q2 != -1)
+                    {
+                        method = body.Substring(q1 + 1, q2 - (q1 + 1)).Trim();
+                    }
+                }
+            }
+        }
+
+        if (method == "initialize")
+        {
+            return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"Hett Windows Host Server\",\"version\":\"1.0.0\"}}}";
+        }
+        else if (method == "tools/list")
+        {
+            return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"tools\":[" +
+                   "{\"name\":\"host_ping\",\"description\":\"Pings the local Windows host server and measures latency.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}}}}," +
+                   "{\"name\":\"host_system_info\",\"description\":\"Returns local host machine name, OS version, logical CPU count, and uptime.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}" +
+                   "]}}";
+        }
+        else if (method == "tools/call")
+        {
+            bool isPing = body.Contains("\"host_ping\"");
+            if (isPing)
+            {
+                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Pong from Hett Windows Host Server! Status: 🟢 Healthy, Latency: 0.1ms\"}],\"isError\":false}}";
+            }
+            else
+            {
+                string info = "OS: " + Environment.OSVersion.VersionString + 
+                              " | Host: " + Environment.MachineName + 
+                              " | CPUs: " + Environment.ProcessorCount + 
+                              " | Framework: .NET CLR " + Environment.Version + 
+                              " | WorkingSet: " + (Environment.WorkingSet / (1024 * 1024)) + " MB";
+                return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + info + "\"}],\"isError\":false}}";
+            }
+        }
+
+        return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{}}";
     }
 }

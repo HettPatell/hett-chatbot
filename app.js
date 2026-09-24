@@ -91,7 +91,33 @@ const DOM = {
   audioFileInput: document.getElementById('audioFileInput'),
   attachmentTray: document.getElementById('attachmentTray'),
   attachmentPreview: document.getElementById('attachmentPreview'),
-  removeAttachmentBtn: document.getElementById('removeAttachmentBtn')
+  removeAttachmentBtn: document.getElementById('removeAttachmentBtn'),
+  // Model Context Protocol (MCP) References
+  mcpBtn: document.getElementById('mcpBtn'),
+  mcpBadge: document.getElementById('mcpBadge'),
+  mcpModal: document.getElementById('mcpModal'),
+  closeMcpBtn: document.getElementById('closeMcpBtn'),
+  closeMcpFooterBtn: document.getElementById('closeMcpFooterBtn'),
+  mcpTabs: document.querySelectorAll('.mcp-tab'),
+  mcpTabPanes: document.querySelectorAll('.mcp-tab-pane'),
+  mcpServersList: document.getElementById('mcpServersList'),
+  mcpActiveCountLabel: document.getElementById('mcpActiveCountLabel'),
+  addMcpServerForm: document.getElementById('addMcpServerForm'),
+  extServerName: document.getElementById('extServerName'),
+  extServerUrl: document.getElementById('extServerUrl'),
+  useLocalHostMcpBtn: document.getElementById('useLocalHostMcpBtn'),
+  extServerTransport: document.getElementById('extServerTransport'),
+  connectExtServerBtn: document.getElementById('connectExtServerBtn'),
+  extServerFeedback: document.getElementById('extServerFeedback'),
+  mcpMemoriesList: document.getElementById('mcpMemoriesList'),
+  newMemoryKey: document.getElementById('newMemoryKey'),
+  newMemoryValue: document.getElementById('newMemoryValue'),
+  saveManualMemoryBtn: document.getElementById('saveManualMemoryBtn'),
+  clearAllMemoriesBtn: document.getElementById('clearAllMemoriesBtn'),
+  testerToolSelect: document.getElementById('testerToolSelect'),
+  testerArgsInput: document.getElementById('testerArgsInput'),
+  runTestToolBtn: document.getElementById('runTestToolBtn'),
+  testerOutput: document.getElementById('testerOutput')
 };
 
 // ---------------------------------------------------------------------------
@@ -694,75 +720,102 @@ async function transcribeAudioWithGroq(audioFile) {
 }
 
 // ---------------------------------------------------------------------------
-// Groq Live Streaming API (Server-Sent Events)
+// Model Context Protocol (MCP) In-Chat Visual Cards
 // ---------------------------------------------------------------------------
-const SYSTEM_INSTRUCTION = `You are Hett, a direct, concise, and highly capable AI assistant.
+function appendMcpToolBubble(toolName, rawArgs) {
+  const bubble = document.createElement('div');
+  bubble.className = 'mcp-tool-bubble';
+
+  let formattedArgs = rawArgs;
+  try {
+    const parsed = typeof rawArgs === 'string' ? JSON.parse(rawArgs) : rawArgs;
+    formattedArgs = JSON.stringify(parsed, null, 2);
+  } catch (e) {}
+
+  bubble.innerHTML = `
+    <div class="mcp-tool-bubble-header">
+      <div class="mcp-tool-bubble-title">
+        <span>⚡</span>
+        <span>MCP Tool: <code>${toolName}</code></span>
+      </div>
+      <span class="mcp-tool-status running">⏳ Executing...</span>
+    </div>
+    <div class="mcp-tool-details">
+      <div><strong>Parameters:</strong></div>
+      <pre>${formattedArgs}</pre>
+      <div class="mcp-tool-result-wrap" style="display:none; margin-top:0.4rem;">
+        <div><strong>Result:</strong></div>
+        <pre class="mcp-tool-result-pre"></pre>
+      </div>
+    </div>
+  `;
+
+  // Toggle details on header click
+  bubble.querySelector('.mcp-tool-bubble-header').addEventListener('click', () => {
+    const details = bubble.querySelector('.mcp-tool-details');
+    details.classList.toggle('hidden');
+  });
+
+  DOM.chatLog.appendChild(bubble);
+  scrollToBottom();
+  return bubble;
+}
+
+function updateMcpToolBubble(bubble, status, output) {
+  if (!bubble) return;
+  const statusSpan = bubble.querySelector('.mcp-tool-status');
+  const resultWrap = bubble.querySelector('.mcp-tool-result-wrap');
+  const resultPre = bubble.querySelector('.mcp-tool-result-pre');
+
+  if (status === 'done') {
+    statusSpan.className = 'mcp-tool-status done';
+    statusSpan.textContent = '✅ Completed';
+  } else if (status === 'error') {
+    statusSpan.className = 'mcp-tool-status error';
+    statusSpan.textContent = '❌ Failed';
+  }
+
+  if (resultWrap && resultPre) {
+    resultWrap.style.display = 'block';
+    let text = typeof output === 'object' ? JSON.stringify(output, null, 2) : String(output);
+    resultPre.textContent = text;
+  }
+  scrollToBottom();
+}
+
+// ---------------------------------------------------------------------------
+// Groq Live Streaming API (Server-Sent Events) with MCP Tool Calling
+// ---------------------------------------------------------------------------
+const SYSTEM_INSTRUCTION = `You are Hett, an intelligent, direct, concise, and highly capable AI assistant equipped with Anthropic Model Context Protocol (MCP) tools.
+- Real-time Tools: You have access to Model Context Protocol (MCP) tools for real-time information (e.g., current date/time, live weather forecasts, Wikipedia lookups, mathematical calculations, string hashing, and persistent memory storage/retrieval).
+- When a user asks a question that can be answered accurately using an available MCP tool (e.g., "what time is it", "weather in London", "calculate 25*48", "remember my preference"), CALL the corresponding tool immediately rather than guessing or refusing.
 - When an image is provided: Provide an exhaustive, deep, and complete description of everything visible in the image. Cover the main subject, background, visible text (OCR), colors, composition, setting, and details.
 - When a video is provided: Analyze the extracted visual scene and provide an informative overview of the video content.
 - When an audio transcription is provided: Answer or address the spoken query thoughtfully.
 - When a PDF/document is provided: Read the extracted text carefully and provide a structured, clear summary with key takeaways.
 - Format cleanly using standard Markdown.`;
 
-async function streamGroqResponse(prompt, attachment, onChunk) {
+/**
+ * Streams Groq completion with support for SSE chunks and tool call accumulation
+ */
+async function streamGroqResponse(messagesList, onChunk) {
   const endpoint = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = STATE.apiKey || HARDCODED_GROQ_KEY;
   const modelToUse = DEFAULT_MODEL;
 
-  const messages = [
-    { role: 'system', content: SYSTEM_INSTRUCTION }
-  ];
+  const mcpTools = window.MCP ? window.MCP.getOpenAiTools() : [];
 
-  STATE.messages.slice(-4).forEach(m => {
-    if (m.content) {
-      messages.push({
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: m.content
-      });
-    }
-  });
+  const payload = {
+    model: modelToUse,
+    messages: messagesList,
+    temperature: 0.6,
+    stream: true
+  };
 
-  let currentContent;
-
-  if (attachment && attachment.type === 'image') {
-    const userText = prompt && prompt.trim().length > 0
-      ? prompt
-      : "Please analyze this image thoroughly and provide a complete, detailed description of everything visible in it, including main objects, any text or labels, colors, and context.";
-
-    currentContent = [
-      { type: "text", text: userText },
-      { type: "image_url", image_url: { url: attachment.dataUrl } }
-    ];
-  } else if (attachment && attachment.type === 'video') {
-    const userText = prompt && prompt.trim().length > 0
-      ? prompt
-      : "Please analyze this video keyframe and describe the visual scene, subject, and context.";
-
-    if (attachment.keyframeUrl) {
-      currentContent = [
-        { type: "text", text: `[Video Attachment: ${attachment.name}, duration: ${attachment.duration}s]\n\n${userText}` },
-        { type: "image_url", image_url: { url: attachment.keyframeUrl } }
-      ];
-    } else {
-      currentContent = `[Video Attachment: ${attachment.name}, duration: ${attachment.duration}s]\n\nUser request: ${userText}`;
-    }
-  } else if (attachment && attachment.type === 'audio') {
-    const userText = prompt && prompt.trim().length > 0 ? prompt : "Please respond to this audio transcription.";
-    currentContent = `[Audio Message Transcription: "${attachment.transcription}"]\n\nUser request: ${userText}`;
-  } else if (attachment && attachment.type === 'pdf') {
-    const userText = prompt && prompt.trim().length > 0
-      ? prompt
-      : "Please read this attached PDF document carefully and provide a comprehensive summary, key findings, and highlight important points.";
-
-    const textContent = attachment.text && attachment.text.length > 0
-      ? attachment.text.slice(0, 40000)
-      : "[Notice: No readable text could be extracted from this PDF. It might be a scanned image.]";
-
-    currentContent = `Document Attached: ${attachment.name} (${attachment.pages} pages)\n\n--- Document Text Content ---\n${textContent}\n\n--- User Request ---\n${userText}`;
-  } else {
-    currentContent = prompt;
+  if (mcpTools.length > 0) {
+    payload.tools = mcpTools;
+    payload.tool_choice = 'auto';
   }
-
-  messages.push({ role: 'user', content: currentContent });
 
   const res = await fetch(endpoint, {
     method: 'POST',
@@ -770,12 +823,7 @@ async function streamGroqResponse(prompt, attachment, onChunk) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
-    body: JSON.stringify({
-      model: modelToUse,
-      messages: messages,
-      temperature: 0.6,
-      stream: true // LIVE STREAMING
-    })
+    body: JSON.stringify(payload)
   });
 
   if (!res.ok) {
@@ -787,31 +835,66 @@ async function streamGroqResponse(prompt, attachment, onChunk) {
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
 
+  const accumulatedToolCalls = {};
+  let finishReason = null;
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
-    buffer = lines.pop(); // keep last incomplete line in buffer
+    buffer = lines.pop();
 
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed.startsWith('data:')) continue;
-      if (trimmed === 'data: [DONE]') return;
+      if (trimmed === 'data: [DONE]') break;
 
       try {
         const jsonStr = trimmed.slice(5).trim();
         const parsed = JSON.parse(jsonStr);
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (delta) {
-          onChunk(delta);
+        const choice = parsed.choices?.[0];
+        if (!choice) continue;
+
+        if (choice.finish_reason) finishReason = choice.finish_reason;
+
+        // Content chunk
+        const deltaContent = choice.delta?.content;
+        if (deltaContent) {
+          onChunk(deltaContent);
+        }
+
+        // Tool call delta chunk
+        const toolCallsDelta = choice.delta?.tool_calls;
+        if (toolCallsDelta && Array.isArray(toolCallsDelta)) {
+          toolCallsDelta.forEach(tc => {
+            const idx = tc.index ?? 0;
+            if (!accumulatedToolCalls[idx]) {
+              accumulatedToolCalls[idx] = {
+                id: tc.id || '',
+                name: tc.function?.name || '',
+                arguments: tc.function?.arguments || ''
+              };
+            } else {
+              if (tc.id) accumulatedToolCalls[idx].id = tc.id;
+              if (tc.function?.name) accumulatedToolCalls[idx].name += tc.function.name;
+              if (tc.function?.arguments) accumulatedToolCalls[idx].arguments += tc.function.arguments;
+            }
+          });
         }
       } catch (e) {
-        // partial json chunk, continue
+        // partial json, continue
       }
     }
   }
+
+  const toolCallsArray = Object.values(accumulatedToolCalls);
+  if (toolCallsArray.length > 0 && finishReason === 'tool_calls') {
+    return { type: 'tool_calls', toolCalls: toolCallsArray };
+  }
+
+  return { type: 'content' };
 }
 
 /**
@@ -826,7 +909,7 @@ async function streamSimulatedText(text, onChunk) {
 }
 
 // ---------------------------------------------------------------------------
-// Send Message Orchestrator
+// Send Message Orchestrator with Agentic MCP Tool Loop
 // ---------------------------------------------------------------------------
 async function handleSend(rawText) {
   const text = (rawText || '').trim();
@@ -869,36 +952,156 @@ async function handleSend(rawText) {
     setTyping(true, 'Hett is thinking...');
   }
 
-  // Create live streaming bubble
-  const streamEntry = createStreamingMessageEntry();
+  // Prepare full conversation messages payload
+  const currentMessages = [
+    { role: 'system', content: SYSTEM_INSTRUCTION }
+  ];
+
+  STATE.messages.slice(-5).forEach(m => {
+    if (m.content) {
+      currentMessages.push({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content
+      });
+    }
+  });
+
+  // Current turn user content
+  let currentContent;
+  if (attachment && attachment.type === 'image') {
+    const userText = text || "Please analyze this image thoroughly and provide a complete description.";
+    currentContent = [
+      { type: "text", text: userText },
+      { type: "image_url", image_url: { url: attachment.dataUrl } }
+    ];
+  } else if (attachment && attachment.type === 'video') {
+    const userText = text || "Please analyze this video keyframe and describe the visual scene.";
+    if (attachment.keyframeUrl) {
+      currentContent = [
+        { type: "text", text: `[Video: ${attachment.name}, duration: ${attachment.duration}s]\n\n${userText}` },
+        { type: "image_url", image_url: { url: attachment.keyframeUrl } }
+      ];
+    } else {
+      currentContent = `[Video: ${attachment.name}, duration: ${attachment.duration}s]\n\nUser request: ${userText}`;
+    }
+  } else if (attachment && attachment.type === 'audio') {
+    const userText = text || "Please respond to this audio transcription.";
+    currentContent = `[Audio Message Transcription: "${attachment.transcription}"]\n\nUser request: ${userText}`;
+  } else if (attachment && attachment.type === 'pdf') {
+    const userText = text || "Please summarize this document.";
+    const textContent = attachment.text && attachment.text.length > 0 ? attachment.text.slice(0, 40000) : "[Empty PDF]";
+    currentContent = `Document Attached: ${attachment.name} (${attachment.pages} pages)\n\n--- Content ---\n${textContent}\n\n--- User Request ---\n${userText}`;
+  } else {
+    currentContent = text;
+  }
+
+  currentMessages.push({ role: 'user', content: currentContent });
 
   try {
     const key = STATE.apiKey || HARDCODED_GROQ_KEY;
 
-    if (key) {
-      let firstChunkReceived = false;
+    if (key && STATE.aiMode !== 'offline') {
+      let iterations = 0;
+      const maxIterations = 3;
 
-      await streamGroqResponse(text, attachment, (chunk) => {
-        if (!firstChunkReceived) {
-          firstChunkReceived = true;
-          setTyping(false); // remove thinking indicator once streaming begins
+      while (iterations < maxIterations) {
+        iterations++;
+        let streamEntry = null;
+
+        const streamResult = await streamGroqResponse(currentMessages, (chunk) => {
+          if (!streamEntry) {
+            setTyping(false);
+            streamEntry = createStreamingMessageEntry();
+          }
+          streamEntry.appendChunk(chunk);
+        });
+
+        // Check if model called MCP tools
+        if (streamResult.type === 'tool_calls' && streamResult.toolCalls.length > 0) {
+          setTyping(false);
+          if (streamEntry) {
+            streamEntry.finalize();
+            streamEntry = null;
+          }
+
+          // Add assistant message with tool_calls
+          currentMessages.push({
+            role: 'assistant',
+            content: null,
+            tool_calls: streamResult.toolCalls.map(tc => ({
+              id: tc.id || `call_${Date.now()}`,
+              type: 'function',
+              function: { name: tc.name, arguments: tc.arguments }
+            }))
+          });
+
+          // Execute each MCP tool
+          for (const tc of streamResult.toolCalls) {
+            const bubble = appendMcpToolBubble(tc.name, tc.arguments);
+            setTyping(true, `Executing MCP tool: ${tc.name}...`);
+
+            try {
+              const execRes = await window.MCP.executeTool(tc.name, tc.arguments);
+              updateMcpToolBubble(bubble, 'done', execRes.result);
+              currentMessages.push({
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: JSON.stringify(execRes.result)
+              });
+            } catch (toolErr) {
+              console.error('MCP tool error:', toolErr);
+              updateMcpToolBubble(bubble, 'error', { error: toolErr.message });
+              currentMessages.push({
+                role: 'tool',
+                tool_call_id: tc.id,
+                content: JSON.stringify({ isError: true, error: toolErr.message })
+              });
+            }
+          }
+
+          // Loop back to stream Groq response with tool data
+          setTyping(true, 'Hett is formulating response...');
+          continue;
         }
-        streamEntry.appendChunk(chunk);
-      });
 
-      setTyping(false);
-      streamEntry.finalize();
+        // Finalize standard stream
+        if (streamEntry) {
+          setTyping(false);
+          streamEntry.finalize();
+        }
+        break;
+      }
     } else {
+      // Offline mode with built-in MCP tool fallback
       setTyping(false);
-      const simulatedText = "Offline Mode: Connect your Groq API key in Settings for live AI answers.";
-      await streamSimulatedText(simulatedText, (chunk) => streamEntry.appendChunk(chunk));
+      const streamEntry = createStreamingMessageEntry();
+
+      // Check if user is asking for time or math offline
+      const lower = text.toLowerCase();
+      if (lower.includes('time') || lower.includes('date')) {
+        const timeRes = await window.MCP.executeTool('get_current_time', {});
+        const timeObj = JSON.parse(timeRes.result.content[0].text);
+        await streamSimulatedText(`Current local date and time: **${timeObj.local_formatted}** (${timeObj.timezone}).`, (c) => streamEntry.appendChunk(c));
+      } else if (lower.includes('calculate') || /^[\d\s+\-*/^().]+$/.test(text)) {
+        try {
+          const mathRes = await window.MCP.executeTool('calculate', { expression: text.replace(/^calculate\s*/i, '') });
+          const mathObj = JSON.parse(mathRes.result.content[0].text);
+          await streamSimulatedText(`Result: **${mathObj.result}**`, (c) => streamEntry.appendChunk(c));
+        } catch (e) {
+          await streamSimulatedText("Could not calculate. Connect Groq API key in Settings for full AI assistance.", (c) => streamEntry.appendChunk(c));
+        }
+      } else {
+        const simulatedText = "Offline Companion: To activate live answers, web search, weather, and full multimodal capabilities, ensure your Groq API key is set in ⚙️ Settings.";
+        await streamSimulatedText(simulatedText, (chunk) => streamEntry.appendChunk(chunk));
+      }
       streamEntry.finalize();
     }
   } catch (err) {
     console.error('Streaming API call failed:', err);
     setTyping(false);
-    streamEntry.appendChunk(`\n\n⚠️ **API Error**: ${err.message}`);
-    streamEntry.finalize();
+    const errEntry = createStreamingMessageEntry();
+    errEntry.appendChunk(`\n\n⚠️ **API Error**: ${err.message}`);
+    errEntry.finalize();
     showToast('API issue: ' + err.message.slice(0, 45));
   } finally {
     STATE.isGenerating = false;
@@ -967,10 +1170,278 @@ function saveSettings() {
 }
 
 // ---------------------------------------------------------------------------
+// Model Context Protocol (MCP) Modal Management
+// ---------------------------------------------------------------------------
+function updateMcpBadge() {
+  if (!window.MCP) return;
+  const count = window.MCP.getActiveToolCount();
+  if (DOM.mcpBadge) DOM.mcpBadge.textContent = count;
+  if (DOM.mcpActiveCountLabel) DOM.mcpActiveCountLabel.textContent = `${count} Tools Ready`;
+}
+
+function openMcpModal() {
+  renderMcpServersList();
+  renderMcpMemoriesList();
+  populateTesterToolSelect();
+  updateMcpBadge();
+  DOM.mcpModal.classList.remove('hidden');
+}
+
+function closeMcpModal() {
+  DOM.mcpModal.classList.add('hidden');
+  updateMcpBadge();
+}
+
+function renderMcpServersList() {
+  if (!DOM.mcpServersList || !window.MCP) return;
+  DOM.mcpServersList.innerHTML = '';
+
+  window.MCP.servers.forEach(server => {
+    const card = document.createElement('div');
+    card.className = 'mcp-server-card';
+
+    const toolsPillsHtml = server.tools.map(tool => {
+      return `<span class="mcp-tool-pill" title="${tool.description}">🛠️ ${tool.name}</span>`;
+    }).join('');
+
+    card.innerHTML = `
+      <div class="mcp-server-top">
+        <div class="mcp-server-info">
+          <span class="mcp-server-icon">${server.icon || '🔌'}</span>
+          <div>
+            <div class="mcp-server-title">${server.name}</div>
+            <div class="mcp-server-desc">${server.description}</div>
+          </div>
+        </div>
+        <label class="mcp-switch" title="Toggle server on/off">
+          <input type="checkbox" ${server.enabled ? 'checked' : ''} data-server-id="${server.id}">
+          <span class="mcp-slider"></span>
+        </label>
+      </div>
+      <div class="mcp-tools-wrap">
+        <span style="font-size:0.75rem; color:var(--text-muted); margin-right:0.3rem;">Tools (${server.tools.length}):</span>
+        ${toolsPillsHtml}
+      </div>
+    `;
+
+    // Toggle switch listener
+    const checkbox = card.querySelector('input[type="checkbox"]');
+    checkbox.addEventListener('change', (e) => {
+      window.MCP.toggleServer(server.id, e.target.checked);
+      updateMcpBadge();
+      populateTesterToolSelect();
+      showToast(`${server.name} ${e.target.checked ? 'enabled' : 'disabled'}`);
+    });
+
+    DOM.mcpServersList.appendChild(card);
+  });
+}
+
+function renderMcpMemoriesList() {
+  if (!DOM.mcpMemoriesList) return;
+  DOM.mcpMemoriesList.innerHTML = '';
+
+  const memories = JSON.parse(localStorage.getItem('hett_mcp_memories') || '{}');
+  const keys = Object.keys(memories);
+
+  if (keys.length === 0) {
+    DOM.mcpMemoriesList.innerHTML = '<div style="font-size:0.82rem; color:var(--text-muted); padding:1rem 0; text-align:center;">No memories stored yet. Tell Hett to remember something or add a note above!</div>';
+    return;
+  }
+
+  keys.forEach(k => {
+    const item = memories[k];
+    const card = document.createElement('div');
+    card.className = 'memory-card';
+    card.innerHTML = `
+      <div class="memory-main">
+        <span class="memory-key">${k}</span>
+        <span class="memory-val">${item.value}</span>
+      </div>
+      <button type="button" class="delete-memory-btn" title="Delete note">✕</button>
+    `;
+
+    card.querySelector('.delete-memory-btn').addEventListener('click', async () => {
+      await window.MCP.executeTool('delete_memory', { key: k });
+      renderMcpMemoriesList();
+      showToast(`Deleted memory "${k}"`);
+    });
+
+    DOM.mcpMemoriesList.appendChild(card);
+  });
+}
+
+function populateTesterToolSelect() {
+  if (!DOM.testerToolSelect || !window.MCP) return;
+  DOM.testerToolSelect.innerHTML = '';
+
+  const allTools = window.MCP.getAllToolsList().filter(t => t.serverEnabled);
+  if (allTools.length === 0) {
+    DOM.testerToolSelect.innerHTML = '<option value="">No active tools</option>';
+    return;
+  }
+
+  allTools.forEach(t => {
+    const opt = document.createElement('option');
+    opt.value = t.toolName;
+    opt.textContent = `${t.serverIcon} ${t.toolName} — ${t.serverName}`;
+    DOM.testerToolSelect.appendChild(opt);
+  });
+
+  updateTesterSampleArgs();
+}
+
+function updateTesterSampleArgs() {
+  if (!DOM.testerToolSelect || !DOM.testerArgsInput) return;
+  const toolName = DOM.testerToolSelect.value;
+  const sampleMap = {
+    'get_current_time': '{}',
+    'calculate': '{"expression": "Math.sqrt(144) + 25 * 3"}',
+    'generate_random': '{"type": "number", "min": 1, "max": 100}',
+    'weather_forecast': '{"city": "Tokyo"}',
+    'wikipedia_search': '{"query": "Quantum Computing"}',
+    'fetch_web_page': '{"url": "https://api.github.com"}',
+    'save_memory': '{"key": "favorite_color", "value": "Emerald Green"}',
+    'retrieve_memories': '{"query": ""}',
+    'delete_memory': '{"key": "favorite_color"}',
+    'word_counter': '{"text": "Hett is a powerful multimodal chatbot with Model Context Protocol."}',
+    'hash_generator': '{"text": "Hello Hett MCP", "algorithm": "sha256"}',
+    'host_ping': '{"message": "Hello from MCP Client"}',
+    'host_system_info': '{}'
+  };
+
+  DOM.testerArgsInput.value = sampleMap[toolName] || '{}';
+}
+
+// ---------------------------------------------------------------------------
 // Event Listeners Initialization
 // ---------------------------------------------------------------------------
 function initEvents() {
-  // Theme Toggle
+  // Model Context Protocol (MCP) Modal Events
+  DOM.mcpBtn.addEventListener('click', openMcpModal);
+  DOM.closeMcpBtn.addEventListener('click', closeMcpModal);
+  DOM.closeMcpFooterBtn.addEventListener('click', closeMcpModal);
+
+  DOM.mcpModal.addEventListener('click', (e) => {
+    if (e.target === DOM.mcpModal) closeMcpModal();
+  });
+
+  // MCP Tab Navigation
+  DOM.mcpTabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      const targetId = tab.getAttribute('data-tab');
+      DOM.mcpTabs.forEach(t => {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+      });
+      DOM.mcpTabPanes.forEach(p => p.classList.add('hidden'));
+
+      tab.classList.add('active');
+      tab.setAttribute('aria-selected', 'true');
+      const targetPane = document.getElementById(targetId);
+      if (targetPane) targetPane.classList.remove('hidden');
+
+      if (targetId === 'memoryTab') renderMcpMemoriesList();
+      if (targetId === 'testerTab') populateTesterToolSelect();
+      if (targetId === 'serversTab') renderMcpServersList();
+    });
+  });
+
+  // Use Local Host MCP Button
+  DOM.useLocalHostMcpBtn.addEventListener('click', () => {
+    DOM.extServerName.value = 'Hett Host Local MCP';
+    DOM.extServerUrl.value = 'http://localhost:8000/mcp';
+    DOM.extServerTransport.value = 'http';
+    showToast('Local host endpoint populated');
+  });
+
+  // Connect External MCP Server Form
+  DOM.addMcpServerForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = DOM.extServerName.value.trim() || 'Custom MCP Server';
+    const url = DOM.extServerUrl.value.trim();
+    const transport = DOM.extServerTransport.value;
+
+    if (!url) {
+      showToast('Please enter an MCP server URL');
+      return;
+    }
+
+    DOM.connectExtServerBtn.disabled = true;
+    DOM.connectExtServerBtn.textContent = '⏳ Connecting...';
+    DOM.extServerFeedback.className = 'mcp-feedback hidden';
+
+    try {
+      const ext = await window.MCP.addExternalServer(name, url, transport);
+      DOM.extServerFeedback.className = 'mcp-feedback success';
+      DOM.extServerFeedback.textContent = `✅ Successfully connected to "${ext.name}"! Discovered ${ext.tools.length} tools.`;
+      DOM.extServerFeedback.classList.remove('hidden');
+      updateMcpBadge();
+      showToast(`Connected ${ext.tools.length} MCP tools!`);
+    } catch (err) {
+      DOM.extServerFeedback.className = 'mcp-feedback error';
+      DOM.extServerFeedback.textContent = `❌ Connection failed: ${err.message}`;
+      DOM.extServerFeedback.classList.remove('hidden');
+    } finally {
+      DOM.connectExtServerBtn.disabled = false;
+      DOM.connectExtServerBtn.textContent = '🔌 Connect & Discover Tools';
+    }
+  });
+
+  // Manual Memory Management
+  DOM.saveManualMemoryBtn.addEventListener('click', async () => {
+    const k = DOM.newMemoryKey.value.trim();
+    const v = DOM.newMemoryValue.value.trim();
+    if (!k || !v) {
+      showToast('Please enter both key and value');
+      return;
+    }
+    await window.MCP.executeTool('save_memory', { key: k, value: v });
+    DOM.newMemoryKey.value = '';
+    DOM.newMemoryValue.value = '';
+    renderMcpMemoriesList();
+    showToast(`Saved note "${k}"`);
+  });
+
+  DOM.clearAllMemoriesBtn.addEventListener('click', () => {
+    if (confirm('Clear all stored memories?')) {
+      localStorage.removeItem('hett_mcp_memories');
+      renderMcpMemoriesList();
+      showToast('All memories cleared');
+    }
+  });
+
+  // Tool Tester Events
+  DOM.testerToolSelect.addEventListener('change', updateTesterSampleArgs);
+
+  DOM.runTestToolBtn.addEventListener('click', async () => {
+    const toolName = DOM.testerToolSelect.value;
+    if (!toolName) return;
+
+    let args = {};
+    try {
+      args = JSON.parse(DOM.testerArgsInput.value || '{}');
+    } catch (err) {
+      DOM.testerOutput.textContent = `Invalid JSON arguments: ${err.message}`;
+      return;
+    }
+
+    DOM.runTestToolBtn.disabled = true;
+    DOM.runTestToolBtn.textContent = '⏳ Running...';
+    DOM.testerOutput.textContent = 'Executing JSON-RPC tools/call request...';
+
+    try {
+      const res = await window.MCP.executeTool(toolName, args);
+      DOM.testerOutput.textContent = JSON.stringify(res, null, 2);
+    } catch (err) {
+      DOM.testerOutput.textContent = `Error executing tool: ${err.message}`;
+    } finally {
+      DOM.runTestToolBtn.disabled = false;
+      DOM.runTestToolBtn.textContent = '⚡ Execute Tool';
+    }
+  });
+
+  // Theme & Settings
   DOM.themeToggleBtn.addEventListener('click', toggleTheme);
   DOM.openSettingsBtn.addEventListener('click', openSettings);
   DOM.closeSettingsBtn.addEventListener('click', closeSettings);
@@ -1114,6 +1585,7 @@ function init() {
   applyTheme(STATE.theme);
   applyFont(STATE.font);
   initEvents();
+  updateMcpBadge();
 }
 
 if (document.readyState === 'loading') {
